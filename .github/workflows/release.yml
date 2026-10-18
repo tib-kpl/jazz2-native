@@ -1,0 +1,220 @@
+# This fork's builds: Android, Windows and Linux on every push to master,
+# published together as a GitHub release of this repository.
+#
+# Each platform is its own job and none waits for another, so a platform that
+# fails does not stop the others: the release carries whatever was built (an
+# APK even when Windows fails, and so on), and the run shows the failure.
+#
+# The APK is signed with this fork's own key, from the JAZZ2_KEYSTORE_BASE64
+# (the keystore, base64) and JAZZ2_KEYSTORE_PASSWORD secrets. Every build is
+# signed with the same key, so a new APK installs over the previous one.
+#
+# The upstream workflows (one per platform) are disabled in this fork's
+# Actions settings rather than deleted, so that syncing with upstream does
+# not conflict on them.
+
+name: 'Release'
+
+on:
+  push:
+    branches:
+      - 'master'
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Android:
+    runs-on: 'ubuntu-latest'
+
+    steps:
+    - name: 'Checkout Repository'
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: 'Create Build Environment'
+      run: |
+        sudo apt update -y
+        sudo apt install -y cmake curl g++
+
+    - name: 'Configure CMake'
+      run: |
+        rm -f ./Content/Translations/*.po
+
+        export JAVA_HOME=$JAVA_HOME_17_X64
+        cmake -B ./_build/ -D CMAKE_BUILD_TYPE=Release -D NCINE_BUILD_ANDROID=ON -D NCINE_UNIVERSAL_APK=ON -D NCINE_NDK_ARCHITECTURES="arm64-v8a;armeabi-v7a" -D NCINE_RHI_GL_PROFILE=ES3
+
+    - name: 'Build'
+      run: |
+        export JAVA_HOME=$JAVA_HOME_17_X64
+        make -j $(nproc) -C ./_build/
+        cd ./_build/Android/
+        gradle assembleRelease
+
+    - name: 'Create Package'
+      env:
+        KEYSTORE_BASE64: ${{ secrets.JAZZ2_KEYSTORE_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.JAZZ2_KEYSTORE_PASSWORD }}
+      run: |
+        mkdir ./_package/
+        $ANDROID_HOME/build-tools/34.0.0/zipalign -p 4 "./_build/Android/app/build/outputs/apk/release/app-universal-release-unsigned.apk" "./_package/Jazz2.apk"
+
+        # (a secret pasted with a Windows line ending keeps its CR)
+        printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > ./_keystore.jks
+        password="$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n')"
+        $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks-key-alias jazz2 --ks "./_keystore.jks" --ks-pass "pass:$password" --key-pass "pass:$password" "./_package/Jazz2.apk"
+        rm -f ./_keystore.jks
+
+    - name: 'Upload Package'
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-android
+        path: ./_package/Jazz2.apk
+
+  Windows:
+    runs-on: 'windows-2022'
+
+    steps:
+    - name: 'Checkout Repository'
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: 'Setup MSBuild'
+      uses: microsoft/setup-msbuild@v3
+
+    - name: 'Download Build Dependencies'
+      run: |
+        mkdir Libs
+        cd Libs
+        Invoke-WebRequest -uri "https://github.com/Chuyu-Team/VC-LTL/releases/download/v4.1.3/VC-LTL-4.1.3-Binary-VS2019.7z" -Method "GET" -Outfile "VC-LTL-Binary.7z"
+        7z x ".\VC-LTL-Binary.7z" -o"VC-LTL"
+
+    - name: 'Configure CMake'
+      run: |
+        rm -force ".\Content\Translations\*.po"
+
+        cmake -B ".\_build\" -D CMAKE_BUILD_TYPE=Release -A x64 -D CMAKE_SYSTEM_PROCESSOR=x64 -D NCINE_ARCH_EXTENSIONS= -D NCINE_PREFERRED_BACKEND=SDL2 -D NCINE_PREFERRED_RHI=OpenGL -D NCINE_STRIP_BINARIES=ON -D CMAKE_GENERATOR_TOOLSET=v142 -D NCINE_BUILD_ASSET_PACKER=OFF -D NCINE_BUILD_SHADER_COMPILER=OFF
+
+    - name: 'Build'
+      run: |
+        cd .\_build\
+        msbuild ".\Jazz2.sln" -p:Configuration=Release -p:Platform=x64
+
+    - name: 'Create Package'
+      run: |
+        mkdir _package
+        Move-Item -Path ".\_build\Release\Jazz2.exe" -Destination ".\_package\Jazz2.exe"
+        Move-Item -Path ".\_build\Release\Jazz2.pdb" -Destination ".\_package\Jazz2.pdb"
+        Move-Item -Path ".\_build\Release\*.dll" -Destination ".\_package\"
+        Move-Item -Path ".\Content\" -Destination ".\_package\Content\"
+        Move-Item -Path ".\LICENSE" -Destination ".\_package\LICENSE"
+
+    - name: 'Upload Package'
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-windows
+        path: ./_package/
+
+  Linux:
+    runs-on: 'ubuntu-22.04'
+
+    steps:
+    - name: 'Checkout Repository'
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: 'Create Build Environment'
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y cmake curl g++ libgl1-mesa-dev libglew2.2 libglfw3 libsdl2-2.0-0 libopenal1 libvorbisfile3 libopenmpt-dev libcurl4-openssl-dev libdw-dev fuse
+
+    - name: 'Configure CMake'
+      run: |
+        rm -f ./Content/Translations/*.po
+
+        cmake -B ./_build/ -D CMAKE_BUILD_TYPE=Release -D DEATH_DEBUG_SYMBOLS=ON -D NCINE_PREFERRED_BACKEND=SDL2 -D NCINE_PREFERRED_RHI=OpenGL -D NCINE_WITH_GLEW=OFF -D NCINE_LINUX_PACKAGE=jazz2 -D NCINE_PACKAGED_CONTENT_PATH=ON -D CMAKE_INSTALL_PREFIX=/usr -D NCINE_BUILD_ASSET_PACKER=OFF -D NCINE_BUILD_SHADER_COMPILER=OFF
+
+    - name: 'Build'
+      run: |
+        DESTDIR=../_appdir/ make install -j $(nproc) -C ./_build/
+
+    - name: 'Create AppImage'
+      run: |
+        curl -s -S -O --location 'https://github.com/darealshinji/linuxdeploy-plugin-checkrt/releases/download/continuous/linuxdeploy-plugin-checkrt.sh'
+        curl -s -S -O --location 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
+        chmod a+x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-checkrt.sh
+
+        mv -f ./_appdir/usr/share/jazz2/Content/ ./_appdir/usr/bin/Content/
+        rm -f -r ./_appdir/usr/share/jazz2/
+        rm -f -r ./_appdir/usr/share/doc/
+
+        # (libdw is loaded with dlopen(), so linuxdeploy has to be told to bundle it: upstream's linux.yml)
+        libdwArgs=""
+        libdwPath="$(ls /usr/lib/*/libdw.so.1 2>/dev/null | head -n 1)"
+        if [ -n "$libdwPath" ]; then libdwArgs="--library=$libdwPath"; fi
+
+        NO_STRIP=1 LDAI_OUTPUT="./_build/Jazz2.AppImage" ARCH=x86_64 ./linuxdeploy-x86_64.AppImage $libdwArgs --appdir=./_appdir/ --icon-filename=jazz2 --desktop-file=./_appdir/usr/share/applications/jazz2.desktop --executable=./_appdir/usr/bin/jazz2 --custom-apprun=./Sources/AppRun --output=appimage --plugin checkrt
+
+    - name: 'Upload Package'
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-linux
+        path: ./_build/Jazz2.AppImage
+
+  Release:
+    # every platform's job has ended, each with or without its package: the
+    # release takes the packages there are
+    needs: [Android, Windows, Linux]
+    if: ${{ always() && github.event_name == 'push' && (needs.Android.result == 'success' || needs.Windows.result == 'success' || needs.Linux.result == 'success') }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+    - name: 'Download Packages'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: release-*
+        path: ./_artifacts/
+
+    - name: 'Collect the Release Files'
+      run: |
+        mkdir ./_release/
+        if [ -f ./_artifacts/release-android/Jazz2.apk ]; then
+          cp ./_artifacts/release-android/Jazz2.apk ./_release/Jazz2_Android.apk
+        fi
+        if [ -d ./_artifacts/release-windows ]; then
+          (cd ./_artifacts/release-windows && zip -qr "$GITHUB_WORKSPACE/_release/Jazz2_Windows_x64.zip" .)
+        fi
+        if [ -f ./_artifacts/release-linux/Jazz2.AppImage ]; then
+          cp ./_artifacts/release-linux/Jazz2.AppImage ./_release/Jazz2_Linux_x64.AppImage
+        fi
+        ls -l ./_release/
+
+    - name: 'Publish'
+      env:
+        MESSAGE: ${{ github.event.head_commit.message }}
+        COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        ANDROID: ${{ needs.Android.result }}
+        WINDOWS: ${{ needs.Windows.result }}
+        LINUX: ${{ needs.Linux.result }}
+      run: |
+        tag="build-$GITHUB_RUN_NUMBER"
+        subject="$(printf '%s' "${MESSAGE:-manual run}" | head -n 1)"
+        {
+          printf '%s\n\nCommit: %s\nBuild: %s\n\n' "$subject" "$COMMIT_URL" "$RUN_URL"
+          printf 'Android: %s, Windows: %s, Linux: %s\n' "$ANDROID" "$WINDOWS" "$LINUX"
+        } > notes.md
+        gh release create "$tag" ./_release/* --target "$GITHUB_SHA" --latest \
+          --title "Build $GITHUB_RUN_NUMBER (${GITHUB_SHA:0:7})" --notes-file notes.md
