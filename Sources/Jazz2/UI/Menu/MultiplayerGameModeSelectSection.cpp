@@ -20,6 +20,7 @@ namespace Jazz2::UI::Menu
 			return;
 		}
 
+		// TRANSLATORS: Header of Select Game Mode section, opened from the Game Mode item when creating a multiplayer game
 		SetTitle(_("Select Game Mode"));
 
 		MpGameMode currentMode = MpGameMode::Battle;
@@ -68,7 +69,7 @@ namespace Jazz2::UI::Menu
 		add(MpGameMode::Cooperation, _("Cooperation"));
 
 		list->SetSelectedIndex(selectedIndex);
-		SetContent(std::move(list));
+		SetContent(Death::move(list));
 	}
 }
 

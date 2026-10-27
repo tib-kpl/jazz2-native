@@ -73,7 +73,7 @@ namespace Jazz2::UI::Menu
 			if (cheatsUsed) flags |= HighscoreFlags::CheatsUsed;
 
 			// TODO: PlayerId is unused
-			AddItemAndFocus(HighscoreItem { std::move(playerName), userId, flags, itemToAdd.Type, difficulty, itemToAdd.Lives, itemToAdd.Score,
+			AddItemAndFocus(HighscoreItem { Death::move(playerName), userId, flags, itemToAdd.Type, difficulty, itemToAdd.Lives, itemToAdd.Score,
 				{ itemToAdd.Gems[0], itemToAdd.Gems[1], itemToAdd.Gems[2], itemToAdd.Gems[3] }, DateTime::UtcNow().ToUnixMilliseconds(), elapsedMilliseconds });
 		}
 	}
@@ -178,6 +178,7 @@ namespace Jazz2::UI::Menu
 
 		SeriesName selectedSeries = (SeriesName)_selectedSeries;
 		if (selectedSeries == SeriesName::BaseGame) {
+			// TRANSLATORS: Header text in Highscores section for the episodes of the full game, keep the color tags \f[c:#d0705d] and \f[/c] as they are
 			_root->DrawStringShadow(_("Highscores for \f[c:#d0705d]Base game\f[/c]"), charOffset, centerX, topLine - 21.0f, IMenuContainer::FontLayer,
 				Alignment::Center, Colorf(0.46f, 0.46f, 0.46f, 0.5f), 0.9f, 0.7f, 1.1f, 1.1f, 0.4f, 0.9f);
 		} else {
@@ -188,6 +189,7 @@ namespace Jazz2::UI::Menu
 				default: episodeName = "Unknown"; break;
 			}
 
+			// TRANSLATORS: Header text in Highscores section, {} is the name of the game edition (Shareware Demo or The Secret Files, not translated), keep the color tags \f[c:#d0705d] and \f[/c] as they are
 			_root->DrawStringShadow(_f("Highscores for \f[c:#d0705d]{}\f[/c]", episodeName), charOffset, centerX, topLine - 21.0f, IMenuContainer::FontLayer,
 				Alignment::Center, Colorf(0.46f, 0.46f, 0.46f, 0.5f), 0.9f, 0.7f, 1.1f, 1.1f, 0.4f, 0.9f);
 		}
@@ -536,7 +538,7 @@ namespace Jazz2::UI::Menu
 		}
 		_list = list.get();
 
-		SetContent(std::move(list));
+		SetContent(Death::move(list));
 	}
 
 	void HighscoresSection::FillDefaultsIfEmpty()
@@ -621,7 +623,7 @@ namespace Jazz2::UI::Menu
 						item.CreatedDate = uc.ReadVariableInt64();
 						item.ElapsedMilliseconds = uc.ReadVariableUint64();
 
-						_series[i].Items.emplace_back(std::move(item));
+						_series[i].Items.emplace_back(Death::move(item));
 					}
 				}
 			}
@@ -685,7 +687,7 @@ namespace Jazz2::UI::Menu
 			return a.Score > b.Score;
 		});
 
-		auto* newItem = items.insert(nearestItem, std::move(item));
+		auto* newItem = items.insert(nearestItem, Death::move(item));
 		std::int32_t index = (std::int32_t)(newItem - &items[0]);
 
 		if ((newItem->Flags & HighscoreFlags::CheatsUsed) == HighscoreFlags::CheatsUsed && PreferencesCache::OverwriteEpisodeEnd != EpisodeEndOverwriteMode::Always) {

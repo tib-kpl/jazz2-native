@@ -8,6 +8,8 @@
 namespace Death {
 //###==##====#=====--==~--~=~- --- -- -  -  -   -
 
+/** @{ @name Build configuration */
+
 /**
 	@brief Whether the current build is for debugging purposes
 	
@@ -89,30 +91,9 @@ namespace Death {
 #define DEATH_CPU_USE_IFUNC
 #undef DEATH_CPU_USE_IFUNC
 
-/**
-	@brief MSVC 2015 compatibility
+/** @} */
 
-	Defined if compatibility mode for Microsoft Visual C++ 2015 is enabled.
-*/
-#define DEATH_MSVC2015_COMPATIBILITY
-#undef DEATH_MSVC2015_COMPATIBILITY
-
-/**
-	@brief MSVC 2017 compatibility
-
-	Defined if compatibility mode for Microsoft Visual C++ 2017 is enabled.
-*/
-#define DEATH_MSVC2017_COMPATIBILITY
-#undef DEATH_MSVC2017_COMPATIBILITY
-
-/**
-	@brief MSVC 2019 compatibility
-
-	Defined if compatibility mode for Microsoft Visual C++ 2019 (or later) *without*
-	the `/permissive-` flag set is enabled.
-*/
-#define DEATH_MSVC2019_COMPATIBILITY
-#undef DEATH_MSVC2019_COMPATIBILITY
+/** @{ @name Targeted operating systems */
 
 /**
 	@brief Unix target
@@ -183,6 +164,10 @@ namespace Death {
 #define DEATH_TARGET_ANDROID
 #undef DEATH_TARGET_ANDROID
 
+/** @} */
+
+/** @{ @name Targeted game consoles and other systems */
+
 /**
 	@brief Nintendo 64 target
 
@@ -217,7 +202,7 @@ namespace Death {
 	@brief Nintendo 3DS target
 
 	Defined if the library is built for Nintendo 3DS (devkitARM and libctru). Its ARM11 MPCore is a 32-bit
-	ARM core, so @ref DEATH_TARGET_ARM and @ref DEATH_TARGET_32BIT are also defined; the toolchain targets
+	ARM core, so @ref DEATH_TARGET_ARM and @ref DEATH_TARGET_32BIT are also defined. The toolchain targets
 	ARMv6K with the VFPv2 unit, so there is no NEON.
 */
 #define DEATH_TARGET_3DS
@@ -289,7 +274,7 @@ namespace Death {
 	Dreamcast's SH-4, one of the supported architectures that none of @ref DEATH_TARGET_X86,
 	@ref DEATH_TARGET_ARM, @ref DEATH_TARGET_POWERPC, @ref DEATH_TARGET_RISCV, @ref DEATH_TARGET_MIPS
 	or @ref DEATH_TARGET_WASM matches, so code that branches on those has to treat it as the unknown
-	case; @ref DEATH_TARGET_BIG_ENDIAN, @ref DEATH_TARGET_32BIT and @ref DEATH_TARGET_CONSTRAINED_MEMORY
+	case. @ref DEATH_TARGET_BIG_ENDIAN, @ref DEATH_TARGET_32BIT and @ref DEATH_TARGET_CONSTRAINED_MEMORY
 	are defined. Despite the shared name this is a target of its own and *not* implied by
 	@ref DEATH_TARGET_AMIGAOS4 --- see there. Note that @ref DEATH_TARGET_UNIX is not defined on any of
 	the Amiga systems, even though the file and process APIs are largely POSIX ones.
@@ -323,6 +308,10 @@ namespace Death {
 */
 #define DEATH_TARGET_MORPHOS
 #undef DEATH_TARGET_MORPHOS
+
+/** @} */
+
+/** @{ @name Targeted CPU architectures */
 
 /**
 	@brief x86 target
@@ -426,6 +415,10 @@ namespace Death {
 #define DEATH_TARGET_WASM
 #undef DEATH_TARGET_WASM
 
+/** @} */
+
+/** @{ @name Platform traits */
+
 /**
 	@brief Whether the library is built for a 32-bit target
 
@@ -458,6 +451,10 @@ namespace Death {
 */
 #define DEATH_TARGET_CONSTRAINED_MEMORY
 #undef DEATH_TARGET_CONSTRAINED_MEMORY
+
+/** @} */
+
+/** @{ @name Compilers */
 
 /**
 	@brief GCC compiler
@@ -584,6 +581,35 @@ namespace Death {
 #undef DEATH_TARGET_MINGW
 
 /**
+	@brief MSVC 2015 compatibility
+
+	Defined if compatibility mode for Microsoft Visual C++ 2015 is enabled.
+*/
+#define DEATH_MSVC2015_COMPATIBILITY
+#undef DEATH_MSVC2015_COMPATIBILITY
+
+/**
+	@brief MSVC 2017 compatibility
+
+	Defined if compatibility mode for Microsoft Visual C++ 2017 is enabled.
+*/
+#define DEATH_MSVC2017_COMPATIBILITY
+#undef DEATH_MSVC2017_COMPATIBILITY
+
+/**
+	@brief MSVC 2019 compatibility
+
+	Defined if compatibility mode for Microsoft Visual C++ 2019 (or later) *without*
+	the `/permissive-` flag set is enabled.
+*/
+#define DEATH_MSVC2019_COMPATIBILITY
+#undef DEATH_MSVC2019_COMPATIBILITY
+
+/** @} */
+
+/** @{ @name Standard libraries */
+
+/**
 	@brief STL libc++ target
 
 	Defined if the library is built against Clang [libc++](https://libcxx.llvm.org/)
@@ -615,7 +641,7 @@ namespace Death {
 	just `__GLIBCXX__`, which contains a release date (and the dates, of course,
 	[overlap for patch releases](https://stackoverflow.com/a/37119478) and can be
 	just anything for custom GCC forks). If libstdc++ is used together with GCC, it
-	can be assumed both have the same version; if libstdc++ is used together with
+	can be assumed both have the same version. If libstdc++ is used together with
 	Clang, the versions can be arbitrary.
 */
 #define DEATH_TARGET_LIBSTDCXX
@@ -635,6 +661,10 @@ namespace Death {
 */
 #define DEATH_TARGET_DINKUMWARE
 #undef DEATH_TARGET_DINKUMWARE
+
+/** @} */
+
+/** @{ @name Targeted CPU instruction sets */
 
 /**
 	@brief SSE2 target
@@ -894,5 +924,7 @@ namespace Death {
 */
 #define DEATH_TARGET_SIMD128
 #undef DEATH_TARGET_SIMD128
+
+/** @} */
 
 }

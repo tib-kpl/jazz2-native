@@ -35,7 +35,7 @@ namespace Jazz2::Editor
 		/** @brief Most pixels a finger moves for a touch to be still a tap, at the scale of the interface 1 */
 		static constexpr float Slop = 10.0f;
 
-		/** @brief Returns whether a position is over the interface, a finger that starts there is a pointer only */
+		/** @brief Returns whether a position is over the interface, a finger that starts there is a pointer only, it never pans */
 		Function<bool(Vector2f)> IsOverInterface;
 		/** @brief Presses the pointer */
 		Function<void(Vector2f)> PointerDown;
@@ -90,6 +90,9 @@ namespace Jazz2::Editor
 		float _maxMove;
 		Vector2f _lastCenter;
 		float _lastSpread;
+		// The finger that presses the interface, and where it was last
+		std::int32_t _pointerId;
+		Vector2f _pointerPosition;
 
 		void Begin(Mode mode);
 		void StartPointer();

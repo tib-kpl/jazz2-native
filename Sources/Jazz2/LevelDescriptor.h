@@ -3,6 +3,7 @@
 #include "../Main.h"
 #include "GameDifficulty.h"
 #include "WeatherType.h"
+#include "Formats/LevelFile.h"
 
 #include "../nCine/Primitives/Vector4.h"
 
@@ -36,6 +37,20 @@ namespace Jazz2
 		GameDifficulty Difficulty = GameDifficulty::Default;
 		/** @brief Whether the session is a multiplayer one, which also adds the multiplayer-only events */
 		bool Multiplayer = false;
+	};
+
+	/**
+		@brief Texts of a level translated to one language
+
+		A level may carry its texts in more languages (see @ref Formats::LevelTextsChunk), the game shows those of the
+		language it's in, and the texts of the level itself where there's no translation.
+	*/
+	struct LocalizedLevelTexts
+	{
+		/** @brief Language, as the game names it in its settings, such as `cs` or `pt-br` */
+		String Language;
+		/** @brief Texts by their number, an empty one isn't translated */
+		SmallVector<String, 0> Texts;
 	};
 
 	/**
@@ -73,7 +88,15 @@ namespace Jazz2
 		std::uint16_t WaterLevel;
 		/** @brief Level texts */
 		SmallVector<String, 0> LevelTexts;
-		/** @brief Whether the level editor can open the level, see @ref LevelFlags::NotEditable */
-		bool Editable = true;
+		/** @brief Level texts translated to other languages, empty if the level has none */
+		SmallVector<LocalizedLevelTexts, 0> LocalizedTexts;
+		/** @brief Level texts as the original game had them, for the script of the level, empty if it has none (see @ref Formats::ScriptTextsChunk) */
+		SmallVector<String, 0> ScriptTexts;
+		/** @brief Custom weapons the level sets up for its script, empty if it has none (see @ref Formats::CustomWeaponsChunk) */
+		SmallVector<std::uint8_t, 0> CustomWeapons;
+		/** @brief Sprites the level recolors for its script, empty if it has none (see @ref Formats::SpriteRecolorsChunk) */
+		SmallVector<std::uint8_t, 0> SpriteRecolors;
+		/** @brief Tile images the level replaces, which scripts read instead of those of the tile sets */
+		SmallVector<Formats::TileDiffuseOverride, 0> TileDiffuseOverrides;
 	};
 }

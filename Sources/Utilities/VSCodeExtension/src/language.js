@@ -25,8 +25,8 @@ const DIRECTIVES = [
 	{
 		name: 'variant',
 		insert: 'variant ${1:NAME};',
-		detail: 'variant <NAME>;',
-		doc: 'Declares one optional variant; may appear several times. The output contains the unnamed base variant (always `Variants[0]`) plus one entry per variant, compiled with `#define <NAME> (1)` baked in. No cross-products.'
+		detail: 'variant <NAME>; | variant <A> + <B>;',
+		doc: 'Declares one optional variant; may appear several times. The output contains the unnamed base variant (always `Variants[0]`) plus one entry per variant, compiled with `<NAME>` defined — the conditionals on it are resolved in the emitted sources of each variant, so its GLSL holds only its own code. No cross-products are made on their own: `variant <A> + <B>;` declares one, a variant named `A_B` compiled with the defines of both - each part has to be a variant declared before it.'
 	},
 	{
 		name: 'render_mode',
@@ -175,8 +175,9 @@ const UNSUPPORTED_BUILTINS = ['NORMAL', 'SCREEN_UV', 'SCREEN_PIXEL_SIZE', 'TIME'
 // of them work in `#ifdef` / `#ifndef` and in `#if` / `#elif` expressions; only `#define` / `#undef`
 // of one is an error. The first two are resolved during stage assembly, the rest when a stage source
 // is built for a given emission. A `.shader` writes every conditional as `#if` - including the ones
-// on variant defines and other flags, which the compiler lowers to `#ifdef` / `defined(...)` on the
-// way out so the emitted GLSL stays legal on the ES profiles.
+// on variant defines, which are resolved for each variant as its sources are built, and on other flags,
+// which the compiler lowers to `#ifdef` / `defined(...)` on the way out so the emitted GLSL stays legal
+// on the ES profiles.
 const CONVENTION = ' Written `#if X` / `#if !X`, so a second condition can join the same directive.';
 const STAGE_MACROS = [
 	{ name: 'VERTEX_STAGE', doc: 'Kept for the vertex stage, dropped for the fragment stage. Resolved during stage assembly — `#define` and `#undef` are errors.' + CONVENTION },
@@ -229,7 +230,9 @@ const FIXED_FUNCTION = {
 	stripHelpers: [
 		{ name: 'strip_position', insert: 'strip_position(${1:0}, ${2:vec2(0.0, 0.0)})', detail: 'strip_position(<index>, <vec2>)', doc: 'Writes the position of vertex `index` in the strip being built.' + STRIP_CAPACITY },
 		{ name: 'strip_uv', insert: 'strip_uv(${1:0}, ${2:vec2(0.0, 0.0)})', detail: 'strip_uv(<index>, <vec2>)', doc: 'Writes the texture coordinate of vertex `index`, in the shader\'s own texture space — the backend folds its padded-store scale in.' + STRIP_CAPACITY },
-		{ name: 'strip_color', insert: 'strip_color(${1:0}, ${2:vec4(1.0, 1.0, 1.0, 1.0)})', detail: 'strip_color(<index>, <vec4>)', doc: 'Writes the colour of vertex `index`, which only `submit_strip_shaded` reads.' + STRIP_CAPACITY }
+		{ name: 'strip_color', insert: 'strip_color(${1:0}, ${2:vec4(1.0, 1.0, 1.0, 1.0)})', detail: 'strip_color(<index>, <vec4>)', doc: 'Writes the colour of vertex `index`, which only `submit_strip_shaded` reads.' + STRIP_CAPACITY },
+		{ name: 'strip_q', insert: 'strip_q(${1:0}, ${2:1.0})', detail: 'strip_q(<index>, <float>)', doc: 'Writes the q of vertex `index`: the UVs of the next strip are interpolated in perspective (`u * q`, `v * q` and `q` across the screen, divided per pixel), the UVs given stay the true ones. Only for the strip submitted next; the GE draws it affine.' + STRIP_CAPACITY },
+		{ name: 'strip_clip', insert: 'strip_clip(${1:vec4(0.0, 0.0, 1.0, 1.0)})', detail: 'strip_clip(<vec4>)', doc: 'Cuts every strip submitted after it to the rectangle (min x, min y, max x, max y in screen space), in the generated code: a strip wholly inside goes out as it is, a rectangle stays one, anything else is cut into convex polygons.' }
 	],
 	context: [
 		{ name: 'texel_size', doc: 'The texel step of the bound texture (`vec2`). Sets the `NeedsTexelStep` requirement, so `Dispatch` only computes it for effects that ask.' },
@@ -237,6 +240,7 @@ const FIXED_FUNCTION = {
 		{ name: 'quad_origin', doc: 'The sprite quad\'s origin in screen space (`vec2`). Sets the `NeedsQuadAxes` requirement.' },
 		{ name: 'quad_axis_x', doc: 'The quad\'s X edge vector in screen space (`vec2`). Sets the `NeedsQuadAxes` requirement.' },
 		{ name: 'quad_axis_y', doc: 'The quad\'s Y edge vector in screen space (`vec2`). Sets the `NeedsQuadAxes` requirement.' },
+		{ name: 'quad_tex_rect', doc: 'The instance\'s texRect (`vec4`: scale and bias of U, then of V) - which part of what the shader draws the quad shows.' },
 		// The argument is an IDENTIFIER, not a string literal - the block expression tokenizer has no
 		// string literals at all, so a quoted name is a hard `unexpected token '"'` from the compiler.
 		// That is why these snippets insert a bare name (see the uniform builtins in

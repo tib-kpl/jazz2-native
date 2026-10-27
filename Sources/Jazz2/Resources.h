@@ -498,8 +498,18 @@ namespace Jazz2::Resources
 
 		TexturedBackground,					/**< Textured background */
 		TexturedBackgroundDither,			/**< Textured background with dithering */
-		TexturedBackgroundCircle,			/**< Circular textured background */
-		TexturedBackgroundCircleDither,		/**< Circular textured background with dithering */
+		TexturedBackgroundTunnel,			/**< Tunnel textured background */
+		TexturedBackgroundTunnelDither,		/**< Tunnel textured background with dithering */
+		TexturedBackgroundPlus,				/**< Textured background in the perspective of JJ2+ */
+		TexturedBackgroundPlusDither,		/**< Textured background in the perspective of JJ2+ with dithering */
+		TexturedBackgroundTunnelPlus,		/**< Tunnel textured background of JJ2+ */
+		TexturedBackgroundTunnelPlusDither,	/**< Tunnel textured background of JJ2+ with dithering */
+		TexturedBackgroundCylinder,			/**< Cylinder textured background */
+		TexturedBackgroundCylinderDither,	/**< Cylinder textured background with dithering */
+		TexturedBackgroundWave,				/**< Wave textured background, it has no dithering */
+
+		TileMapMeshHeat,					/**< Tiles of the heat effect, see @ref Tiles::LayerTileFlags::Heat */
+		TileMapMeshHeatPalette,				/**< Tiles of the heat effect with palette */
 
 		Colorized,							/**< Colorized */
 		BatchedColorized,					/**< Batched variant of @ref Colorized */
@@ -525,6 +535,10 @@ namespace Jazz2::Resources
 		BatchedFrozenMaskPalette,			/**< Batched variant of @ref FrozenMaskPalette */
 		TintedPalette,						/**< Palette variant of @ref Tinted */
 		BatchedTintedPalette,				/**< Batched variant of @ref TintedPalette */
+		SingleColor,						/**< The shape of a sprite in a single color, see @ref Tiles::LayerRendererType::SingleColor */
+		BatchedSingleColor,					/**< Batched variant of @ref SingleColor */
+		SingleColorPalette,					/**< Palette variant of @ref SingleColor */
+		BatchedSingleColorPalette,			/**< Batched variant of @ref SingleColorPalette */
 		ShieldFire,							/**< Fire shield effect */
 		BatchedShieldFire,					/**< Batched variant of @ref ShieldFire */
 		ShieldLightning,					/**< Lightning shield effect */
@@ -537,8 +551,8 @@ namespace Jazz2::Resources
 		TileMapMeshPalette,					/**< Batched variant of @ref TileMapMesh */
 #endif
 #if defined(TILEMAP_LAYER_EFFECTS)
-		// The special tile layers (see Tiles::LayerRendererType::XRay and ::BlurBehind) and the actor coverage the
-		// x-ray layers sample. Compiled only once a level that has such a layer is loaded, see
+		// The special tile layers (see Tiles::LayerRendererType::XRay, ::BlurBehind, ::Reflection and ::ChromaKey) and the actor
+		// coverage the x-ray layers sample. Compiled only once a level that has such a layer is loaded, see
 		// ContentResolver::CompileLayerEffectShaders()
 		TileMapMeshXRay,					/**< Animated tiles of an x-ray layer */
 		TileMapMeshXRayPalette,				/**< Palette variant of @ref TileMapMeshXRay */
@@ -546,6 +560,15 @@ namespace Jazz2::Resources
 		TileMapMeshBlurPalette,				/**< Palette variant of @ref TileMapMeshBlur */
 		Silhouette,							/**< Coverage of the actors behind an x-ray layer */
 		SilhouettePalette,					/**< Palette variant of @ref Silhouette */
+		TexturedBackgroundReflection,		/**< Reflection layer */
+		TileMapMeshChromaKey,				/**< Chroma key layer */
+		TileMapMeshChromaKeyPalette,		/**< Palette variant of @ref TileMapMeshChromaKey */
+		TexturedBackgroundKeyed,			/**< Chroma key or translucent variant of @ref TexturedBackground */
+		TexturedBackgroundTunnelKeyed,		/**< Chroma key or translucent variant of @ref TexturedBackgroundTunnel */
+		TexturedBackgroundPlusKeyed,		/**< Chroma key or translucent variant of @ref TexturedBackgroundPlus */
+		TexturedBackgroundTunnelPlusKeyed,	/**< Chroma key or translucent variant of @ref TexturedBackgroundTunnelPlus */
+		TexturedBackgroundCylinderKeyed,	/**< Chroma key or translucent variant of @ref TexturedBackgroundCylinder */
+		TexturedBackgroundWaveKeyed,		/**< Chroma key or translucent variant of @ref TexturedBackgroundWave */
 #endif
 
 #if !defined(DISABLE_RESCALE_SHADERS)

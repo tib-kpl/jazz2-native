@@ -4,6 +4,7 @@
 
 #include <optional>
 
+#include <Base/Format.h>
 #include <Containers/Array.h>
 #include <Containers/SmallVector.h>
 #include <Containers/String.h>
@@ -134,7 +135,7 @@ namespace nCine
 	{
 		I18n& i18n = I18n::Get();
 		StringView translated = i18n.LookupTranslation(text);
-		return format(translated ? translated.data() : text, args...);
+		return Death::format(translated ? translated.data() : text, args...);
 	}
 
 	/**
@@ -152,6 +153,38 @@ namespace nCine
 		} else {
 			fmt = (n == 1 ? textSingular : textPlural);
 		}
-		return format(fmt, args...);
+		return Death::format(fmt, args...);
+	}
+
+	/**
+	 * @relates I18n
+	 * @brief Translates and formats text in singular form using the primary translation catalog and the specified @p context
+	 */
+	template<class ...Args>
+	String _fx(StringView context, const char* text, const Args&... args)
+	{
+		I18n& i18n = I18n::Get();
+		StringView textView = text;
+		StringView translated = i18n.LookupTranslation(String(&I18n::ContextSeparator, 1).join({ context, textView }).data());
+		return Death::format(translated ? translated.data() : text, args...);
+	}
+
+	/**
+	 * @relates I18n
+	 * @brief Translates and formats text in singular or plural form (selected by count @p n) using the primary translation catalog and the specified @p context
+	 */
+	template<class ...Args>
+	String _fnx(StringView context, const char* textSingular, const char* textPlural, std::int32_t n, const Args&... args)
+	{
+		I18n& i18n = I18n::Get();
+		StringView singularView = textSingular;
+		StringView translated = i18n.LookupTranslation(String(&I18n::ContextSeparator, 1).join({ context, singularView }).data());
+		const char* fmt;
+		if (translated != nullptr) {
+			fmt = i18n.LookupPlural(n, translated).data();
+		} else {
+			fmt = (n == 1 ? textSingular : textPlural);
+		}
+		return Death::format(fmt, args...);
 	}
 }

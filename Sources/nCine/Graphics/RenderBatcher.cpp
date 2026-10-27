@@ -132,9 +132,26 @@ namespace nCine
 		batchCommand->SetVisitOrder(refCommand->GetVisitOrder());
 	}
 
+#if defined(RHI_CAP_POSTPROCESSING)
 	void RenderBatcher::CreateBatches(const SmallVectorImpl<RenderCommand*>& srcQueue, SmallVectorImpl<RenderCommand*>& destQueue,
-		std::uint32_t splitLayer)
+		ArrayView<const std::uint32_t> splitLayers)
+#else
+	void RenderBatcher::CreateBatches(const SmallVectorImpl<RenderCommand*>& srcQueue, SmallVectorImpl<RenderCommand*>& destQueue)
+#endif
 	{
+#if defined(RHI_CAP_POSTPROCESSING)
+		// Whether a split layer lies between two layers, which the queue sort keeps adjacent
+		const auto isSplitBetween = [splitLayers](std::uint32_t prevLayer, std::uint32_t layer) {
+			const std::uint32_t lower = std::min(prevLayer, layer), upper = std::max(prevLayer, layer);
+			for (std::uint32_t splitLayer : splitLayers) {
+				if (splitLayer > lower) {
+					return (splitLayer <= upper);
+				}
+			}
+			return false;
+		};
+#endif
+
 		std::uint32_t minBatchSize, maxBatchSize;
 		GetBatchSizeLimits(minBatchSize, maxBatchSize);
 
@@ -149,10 +166,14 @@ namespace nCine
 
 			// Should split if material sort key (that takes into account shader program, textures and blending) or primitive type differs
 			// GL_LINE_STRIP is split always, because it cannot be batched
-			// The layer isn't part of that key, so neighbours on two sides of the split layer have to be told apart
-			// on their own - a batch spanning it would be drawn whole in the first part of a split queue
+			// The layer isn't part of that key, so neighbours on two sides of a split layer have to be told apart
+			// on their own - a batch spanning it would be drawn whole in the earlier part of a split queue
 			const bool shouldSplit = (command->GetLowerMaterialSortKey() != prevCommand->GetLowerMaterialSortKey() || prevPrimitive != primitive ||
-				primitive == PrimitiveType::LineStrip || (prevCommand->GetLayer() < splitLayer) != (command->GetLayer() < splitLayer));
+				primitive == PrimitiveType::LineStrip
+#if defined(RHI_CAP_POSTPROCESSING)
+				|| (prevCommand->GetLayer() != command->GetLayer() && isSplitBetween(prevCommand->GetLayer(), command->GetLayer()))
+#endif
+				);
 
 			// Also collect the very last command if it can be batched with the previous one
 			std::uint32_t endSplit = (i == srcQueue.size() - 1 && !shouldSplit ? i + 1 : i);
@@ -313,6 +334,43 @@ namespace nCine
 		RHI::ShaderProgram* batchedShader = RenderResources::GetBatchedShader(refShader);
 		// The following check should never fail as it is already checked by the calling function
 		FATAL_ASSERT_MSG(batchedShader != nullptr, "Unsupported shader for batch element");
+
+		const std::uint32_t maxVertexDataSize = RenderResources::GetBuffersManager().Specs(RenderBuffersManager::BufferTypes::Array).maxSize;
+		const std::uint32_t maxIndexDataSize = RenderResources::GetBuffersManager().Specs(RenderBuffersManager::BufferTypes::ElementArray).maxSize;
+		const bool refShaderHasAttributes = (refShader->GetAttributeCount() > 0);
+		// The VBO and IBO memory a command takes in a batch, with or without indices
+		const auto getBatchedGeometrySize = [refShaderHasAttributes](const RenderCommand* command, bool withIndices, std::uint32_t& vertexDataSize, std::uint32_t& numIndices) {
+			vertexDataSize = 0;
+			numIndices = command->GetGeometry().GetIndexCount();
+			if (refShaderHasAttributes) {
+				std::uint32_t numVertices = command->GetGeometry().GetVertexCount();
+				if (!withIndices) {
+					numVertices += 2; // plus two degenerates if indices are not used
+				}
+				const std::uint32_t numElementsPerVertex = command->GetGeometry().GetElementsPerVertex() + 1; // plus the mesh index
+				vertexDataSize = numVertices * numElementsPerVertex * sizeof(float);
+
+				if (withIndices) {
+					numIndices = (numIndices > 0) ? numIndices + 2 : numVertices + 2;
+				}
+			}
+		};
+		const auto fitsIntoBatch = [maxVertexDataSize, maxIndexDataSize](std::uint32_t vertexDataSize, std::uint32_t numIndices) {
+			return (vertexDataSize <= maxVertexDataSize && numIndices * sizeof(std::uint16_t) <= maxIndexDataSize && numIndices <= 65535);
+		};
+
+		{
+			// A command too large to be batched either way is drawn on its own (see below), found out before anything
+			// is taken for the batch - neither a pooled command nor uniform memory then goes to waste
+			std::uint32_t vertexDataSize, numIndices, vertexDataSizeWithIndices, numIndicesWithIndices;
+			getBatchedGeometrySize(refCommand, false, vertexDataSize, numIndices);
+			getBatchedGeometrySize(refCommand, true, vertexDataSizeWithIndices, numIndicesWithIndices);
+			if (!fitsIntoBatch(vertexDataSize, numIndices) && !fitsIntoBatch(vertexDataSizeWithIndices, numIndicesWithIndices)) {
+				nextStart = start;
+				return nullptr;
+			}
+		}
+
 		bool commandAdded = false;
 		batchCommand = RenderResources::GetRenderCommandPool().RetrieveOrAdd(batchedShader, commandAdded);
 
@@ -351,32 +409,14 @@ namespace nCine
 		batchCommand->GetMaterial().SetUniformsDataPointer(AcquireMemory(nonInstanceUniformsSize + instancesBlockSize));
 		CopyNonInstanceUniforms(batchCommand, refCommand, singleInstanceBlock, commandAdded);
 
-		const std::uint32_t maxVertexDataSize = RenderResources::GetBuffersManager().Specs(RenderBuffersManager::BufferTypes::Array).maxSize;
-		const std::uint32_t maxIndexDataSize = RenderResources::GetBuffersManager().Specs(RenderBuffersManager::BufferTypes::ElementArray).maxSize;
 		// Sum the amount of VBO and IBO memory required by the batch
 		it = start;
-		const bool refShaderHasAttributes = (refShader->GetAttributeCount() > 0);
 		while (it != nextStart) {
-			std::uint32_t vertexDataSize = 0;
-			std::uint32_t numIndices = (*it)->GetGeometry().GetIndexCount();
-
-			if (refShaderHasAttributes) {
-				std::uint32_t numVertices = (*it)->GetGeometry().GetVertexCount();
-				if (!batchingWithIndices) {
-					numVertices += 2; // plus two degenerates if indices are not used
-				}
-				const std::uint32_t numElementsPerVertex = (*it)->GetGeometry().GetElementsPerVertex() + 1; // plus the mesh index
-				vertexDataSize = numVertices * numElementsPerVertex * sizeof(float);
-
-				if (batchingWithIndices) {
-					numIndices = (numIndices > 0) ? numIndices + 2 : numVertices + 2;
-				}
-			}
+			std::uint32_t vertexDataSize, numIndices;
+			getBatchedGeometrySize(*it, batchingWithIndices, vertexDataSize, numIndices);
 
 			// Don't request more bytes than a common VBO or IBO can hold
-			if (instancesVertexDataSize + vertexDataSize > maxVertexDataSize ||
-				(instancesIndicesAmount + numIndices) * sizeof(std::uint16_t) > maxIndexDataSize ||
-				instancesIndicesAmount + numIndices > 65535) {
+			if (!fitsIntoBatch(instancesVertexDataSize + vertexDataSize, instancesIndicesAmount + numIndices)) {
 				break;
 			}
 
@@ -386,7 +426,8 @@ namespace nCine
 		}
 		if (it == start) {
 			// Its vertices alone are more than a batch can hold, it has to be drawn on its own - a batch of nothing
-			// would never move past it
+			// would never move past it. Rare after the check above: only a command that would fit without indices,
+			// batched with others that have them (or the other way around), gets here.
 			nextStart = start;
 			return nullptr;
 		}

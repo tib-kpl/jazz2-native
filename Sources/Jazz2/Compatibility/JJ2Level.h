@@ -7,7 +7,10 @@
 #include "EventConverter.h"
 #include "../WeatherType.h"
 #include "../Formats/LevelFile.h"
+#include "../Formats/TileSetFile.h"
 #include "../Tiles/LayerTypes.h"
+
+#include <memory>
 
 #include <Containers/Function.h>
 #include <Containers/SmallVector.h>
@@ -112,8 +115,27 @@ namespace Jazz2::Compatibility
 		/** @brief Opens and parses the specified level file */
 		bool Open(StringView path, bool strictParser);
 
-		/** @brief Converts the level and writes the result to the specified target path */
-		void Convert(StringView targetPath, EventConverter& eventConverter, Function<LevelToken(StringView)>&& levelTokenConversion = {});
+		/** @brief Reads only the names of the levels the specified level leads to, without parsing the rest of it */
+		static bool ReadExits(StringView path, String& nextLevel, String& secretLevel, String& bonusLevel);
+
+		/**
+		 * @brief Converts the level and writes the result to the specified target path
+		 *
+		 * With @p tilesetLookup, which converts tiles of an original tile set of a name into memory, or returns `nullptr`
+		 * if there's no such tile set, the level gets a preview drawn with them (see @ref Formats::LevelPreview). It's
+		 * given the indices of the tiles the preview takes, sorted, returns them in the same order (one past the end of
+		 * the tile set empty) and sets the last argument to the number of tiles of the whole tile set. A level whose
+		 * default tile set isn't there gets none, the tiles of an extra tile set that isn't there are left out.
+		 *
+		 * With @p textureLookup, which fills @ref Formats::TexturedLayerChunk::TextureSize ×
+		 * @ref Formats::TexturedLayerChunk::TextureSize palette indices with a texture of JJ2+ by its number
+		 * (`TEXTURE::Texture`, from 1) and returns `false` if there's no such texture, a textured layer of a level made
+		 * for JJ2+ gets the texture it names. Without it, or without the texture, the layer gets a texture made up of
+		 * smooth noise in the same colors, which ripples a reflection alike.
+		 */
+		void Convert(StringView targetPath, EventConverter& eventConverter, Function<LevelToken(StringView)>&& levelTokenConversion = {},
+			Function<std::shared_ptr<const Formats::TileSetData>(StringView, ArrayView<const std::int32_t>, std::int32_t&)>&& tilesetLookup = {},
+			Function<bool(std::int32_t, std::uint8_t*)>&& textureLookup = {});
 		/** @brief Marks the level text with the specified ID as a level token */
 		void AddLevelTokenTextID(std::uint8_t textId);
 		/** @brief Records a music track that an event of the level switches to, in the form the converted level asks for it */
@@ -148,8 +170,32 @@ namespace Jazz2::Compatibility
 		std::int32_t GetMaxSupportedAnims() const {
 			return (_version == JJ2Version::BaseGame ? 128 : 256);
 		}
+		/** @brief Returns the first tile ID of the animated tiles, the IDs below it are the tiles of the tile sets */
+		std::int32_t GetAnimatedTilesOffset() const {
+			return GetMaxSupportedTiles() - _animCount;
+		}
+
+		/**
+		 * @brief Converts a layer as the converted level has it, returns `false` if there's no such layer or it has no size
+		 *
+		 * @p index is 0 to 7 for the layers of the original, more for the additional layers of MLLE. The tile IDs are those
+		 * of this level, the animated tiles from @ref GetAnimatedTilesOffset() up. A texture of its own of a textured
+		 * layer isn't converted. Meant for scripts, which take layers of other levels (`jjLayersFromLevel()` of JJ2+).
+		 */
+		bool ConvertLayer(std::int32_t index, Formats::LayerRecord& record, SmallVectorImpl<Formats::TileRecord>& tiles) const;
 
 	private:
+		// Types of the textured background of a layer as JJ2+ takes them (TEXTURE::Style), plain JJ2 knows only the first
+		static constexpr std::uint8_t TexturedStyleWarpHorizon = 0;
+		static constexpr std::uint8_t TexturedStyleTunnel = 1;
+		static constexpr std::uint8_t TexturedStyleMenu = 2;
+		static constexpr std::uint8_t TexturedStyleTileMenu = 3;
+		static constexpr std::uint8_t TexturedStyleWave = 4;
+		static constexpr std::uint8_t TexturedStyleCylinder = 5;
+		static constexpr std::uint8_t TexturedStyleReflection = 6;
+		// The tile type of JJ2+ whose rows of pixels are drawn wavily, as if seen through heat (see Tiles::LayerTileFlags::Heat)
+		static constexpr std::uint8_t TileTypeHeatEffect = 5;
+
 		enum class LayerSectionSpeedModel {
 			Normal,
 			Legacy,
@@ -185,7 +231,24 @@ namespace Jazz2::Compatibility
 			std::uint8_t TexturedParams3;
 			std::uint8_t SpriteMode;
 			std::uint8_t SpriteParam;
+			// Of a textured layer, only the MLLE stream has them: where it's drawn (1 the original way, 2 the whole view, 3 and 4
+			// only where the layer is, 0 if the stream doesn't say), whether it fades or the palette entry of the tint of a
+			// reflection, where its fade is (the horizon of a reflection), the speeds of its texture inside the layer drawn only
+			// where it is, and its texture (0 the tiles of the layer, more one of the textures of JJ2+, less an image of its
+			// own, which is then in TextureImage)
+			std::uint8_t TextureSurface = 0;
+			std::uint8_t TextureFade = 192;
+			float TextureFadeX = 0.5f;
+			float TextureFadeY = 0.5f;
+			float InnerSpeedX = 0.0f;
+			float InnerSpeedY = 0.0f;
+			float InnerAutoSpeedX = 0.0f;
+			float InnerAutoSpeedY = 0.0f;
+			std::int8_t TextureSource = 0;
+			std::unique_ptr<std::uint8_t[]> TextureImage;
 			std::unique_ptr<std::uint16_t[]> Tiles;
+			// The name MLLE gave the layer, which scripts find it by (MLLE::GetLayer())
+			String Name;
 		};
 
 		struct TileEventSection {
@@ -197,6 +260,12 @@ namespace Jazz2::Compatibility
 
 			std::int32_t GeneratorDelay;
 			ConversionResult Converted;
+		};
+
+		// An event of the grid that isn't empty, by its tile index (x + y * width of the sprite layer)
+		struct GridEventSection {
+			std::int32_t Index;
+			TileEventSection Event;
 		};
 
 		struct TilePropertiesSection {
@@ -245,6 +314,8 @@ namespace Jazz2::Compatibility
 		std::uint16_t _animCount;
 		bool _isHidden, _verticalMPSplitscreen, _isMpLevel;
 		bool _hasPit, _hasPitInstantDeath, _hasCTF, _hasLaps;
+		bool _hasMlleData = false;
+		bool _hasScript = false;
 		std::uint32_t _darknessColor;
 		WeatherType _weatherType;
 		std::uint8_t _weatherIntensity;
@@ -259,10 +330,14 @@ namespace Jazz2::Compatibility
 		std::unique_ptr<AnimatedTileSection[]> _animatedTiles;
 		SmallVector<OverridenTileDiffuse, 0> _overridenTileDiffuses;
 		SmallVector<OverridenTileMask, 0> _overridenTileMasks;
-		std::unique_ptr<TileEventSection[]> _events;
+		// Only the tiles with an event, sorted by their index - most have none, and a whole grid of them takes tens of MB
+		// for a big level, more than consoles have
+		SmallVector<GridEventSection, 0> _events;
 		SmallVector<std::uint8_t, TextEventStringsCount> _levelTokenTextIds;
 		SmallVector<String, 0> _eventMusic;
 		SmallVector<OffGridEvent, 0> _offGridEvents;
+		SmallVector<std::uint8_t, 0> _mlleWeapons;
+		SmallVector<std::uint8_t, 0> _mlleSpriteRecolors;
 
 		void LoadMetadata(JJ2Block& block, bool strictParser);
 		void LoadStaticTileData(JJ2Block& block, bool strictParser);
@@ -272,10 +347,24 @@ namespace Jazz2::Compatibility
 		bool LoadLayers(JJ2Block& dictBlock, JJ2Block& layoutBlock, bool strictParser);
 		void LoadMlleData(JJ2Block& block, std::uint32_t version, StringView path, bool strictParser);
 		void CheckWaterLevelAroundStart();
+		// Returns the event of a tile of the grid, `nullptr` if it has none
+		const TileEventSection* FindEvent(std::int32_t x, std::int32_t y) const;
+
+		// Makes the record of a layer as Convert() writes it, and its texture of its own, if it has one - for a level of JJ2+
+		// with the textured layers drawn as there
+		void MakeLayerRecord(std::int32_t index, Formats::LayerRecord& record, SmallVectorImpl<std::uint8_t>& texture,
+			Function<bool(std::int32_t, std::uint8_t*)>& textureLookup, bool forPlusLevel) const;
+		// Converts a tile of a layer, with the flips and the modifier of its tile type
+		Formats::TileRecord ConvertLayerTile(std::uint16_t tileIdx) const;
 
 		static String ConvertLevelName(StringView value, Function<LevelToken(StringView)>& levelTokenConversion);
 		static void ExpandPalette(const std::uint8_t* colors, std::uint32_t* palette);
 		static Tiles::LayerSpeedModel ConvertSpeedModel(LayerSectionSpeedModel speedModel);
+		// Sets the renderer type and the color of a layer drawn in a SPRITE::Mode of JJ2+, as MLLE sets it
+		static void ConvertSpriteMode(std::uint8_t spriteMode, std::uint8_t spriteParam, Formats::LayerRecord& record);
+		// Fills a texture of a textured layer with smooth noise that repeats, in the colors the textures of JJ2+ take (176 to
+		// 207), for a layer whose texture of JJ2+ isn't available
+		static void MakeRippleTexture(std::uint8_t* pixels);
 		static Formats::EventRecord MakeEventRecord(const ConversionResult& converted, bool illuminate, std::uint8_t difficulty, std::uint8_t generatorFlags, std::int32_t generatorDelay);
 		static bool StringHasSuffixIgnoreCase(StringView value, StringView suffix);
 	};

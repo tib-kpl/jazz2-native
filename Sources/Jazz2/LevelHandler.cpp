@@ -1,6 +1,7 @@
 ﻿#include "LevelHandler.h"
 #include "ContentResolver.h"
 #include "PreferencesCache.h"
+#include "Formats/LevelTextsChunk.h"
 #include "Rendering/PlayerViewport.h"
 #include "UI/DiscordRpcClient.h"
 #include "UI/HUD.h"
@@ -32,6 +33,9 @@
 
 #if defined(WITH_PHYSICS_PROBE)
 #	include "Tests/PhysicsProbe.h"
+#endif
+#if defined(WITH_EDITOR)
+#	include "Editor/Runtime/PlayTestDebug.h"
 #endif
 
 #include <float.h>
@@ -211,6 +215,11 @@ namespace Jazz2
 		if (_console != nullptr) {
 			_console->setParent(nullptr);
 		}
+#if defined(WITH_EDITOR)
+		if (_playTestDebug != nullptr) {
+			_playTestDebug->DetachOverlay();
+		}
+#endif
 
 		TracyPlot("Actors", 0LL);
 	}
@@ -240,7 +249,7 @@ namespace Jazz2
 		_noiseTexture = resolver.GetNoiseTexture();
 #endif
 
-		_rootNode = std::make_unique<SceneNode>();
+		_rootNode = CreateRootNode();
 		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
@@ -251,9 +260,10 @@ namespace Jazz2
 			return false;
 		}
 
+		// TRANSLATORS: Debug message in the console when a level is loaded, {} is level name
 		_console->WriteLine(UI::MessageLevel::Debug, _f("Level \"{}\" initialized", descriptor.DisplayName));
 
-		AttachComponents(std::move(descriptor));
+		AttachComponents(Death::move(descriptor));
 		SpawnPlayers(levelInit);		
 
 		// The level was entered from another one, which the player returns to once this special level is completed
@@ -301,7 +311,7 @@ namespace Jazz2
 		_noiseTexture = resolver.GetNoiseTexture();
 #endif
 
-		_rootNode = std::make_unique<SceneNode>();
+		_rootNode = CreateRootNode();
 		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
@@ -312,17 +322,22 @@ namespace Jazz2
 			return false;
 		}
 
+		// TRANSLATORS: Debug message in the console when a level is loaded, {} is level name
 		_console->WriteLine(UI::MessageLevel::Debug, _f("Level \"{}\" initialized", descriptor.DisplayName));
 
-		AttachComponents(std::move(descriptor));
+		AttachComponents(Death::move(descriptor));
 
 		// All components are ready, deserialize the rest of state
 		_waterLevel = src.ReadValueAsLE<float>();
 		_weatherType = (WeatherType)src.ReadValue<std::uint8_t>();
 		_weatherIntensity = src.ReadValue<std::uint8_t>();
 
-		_tileMap->InitializeFromStream(src);
-		_eventMap->InitializeFromStream(src);
+		// The level is loaded again by its name, and it can have changed since the state was saved (the level editor saves
+		// into the user content, which shadows the shipped levels); such a state doesn't fit it and can't be resumed
+		if (!_tileMap->InitializeFromStream(src) || !_eventMap->InitializeFromStream(src)) {
+			LOGE("Cannot resume level \"{}\", it was changed since the state was saved", _levelName);
+			return false;
+		}
 
 		std::uint32_t playerCount = src.ReadValue<std::uint8_t>();
 		_players.reserve(playerCount);
@@ -355,7 +370,10 @@ namespace Jazz2
 			// Actors as they were at the checkpoint, their events are marked active, so they are not spawned twice
 			ReadSnapshotData(src, _checkpointSnapshot);
 			if (!_checkpointSnapshot.empty()) {
-				_eventMap->InitializeActiveStateFromStream(src);
+				if (!_eventMap->InitializeActiveStateFromStream(src)) {
+					LOGE("Cannot resume level \"{}\", it was changed since the state was saved", _levelName);
+					return false;
+				}
 				if (CanUseLevelStateSnapshots()) {
 					RestoreCheckpointSnapshot();
 				} else {
@@ -366,7 +384,7 @@ namespace Jazz2
 			LevelStateSnapshot returnLevelState;
 			ReadSnapshotData(src, returnLevelState);
 			if (!returnLevelState.empty()) {
-				_returnLevelState = std::make_shared<LevelStateSnapshot>(std::move(returnLevelState));
+				_returnLevelState = std::make_shared<LevelStateSnapshot>(Death::move(returnLevelState));
 			}
 		}
 
@@ -500,7 +518,12 @@ namespace Jazz2
 		maxHealth = 0;
 
 		if (_activeBoss == nullptr) {
+#if defined(WITH_ANGELSCRIPT)
+			// A boss a level script drives itself
+			return (_scripts != nullptr && _scripts->GetScriptBossHealth(health, maxHealth));
+#else
 			return false;
+#endif
 		}
 
 		health = _activeBoss->GetHealth();
@@ -597,7 +620,7 @@ namespace Jazz2
 
 	void LevelHandler::InvokeAsync(Function<void()>&& callback)
 	{
-		_root->InvokeAsync(weak_from_this(), std::move(callback));
+		_root->InvokeAsync(weak_from_this(), Death::move(callback));
 	}
 
 	LevelHandler::ViewportSetup LevelHandler::GetViewportSetup(std::int32_t width, std::int32_t height)
@@ -634,11 +657,22 @@ namespace Jazz2
 		return options;
 	}
 
+	std::unique_ptr<SceneNode> LevelHandler::CreateRootNode()
+	{
+#if defined(WITH_EDITOR)
+		if (_playTestDebug != nullptr) {
+			// Updates the objects with the time of the play-test, see Editor::PlayTestDebug::SetOptions()
+			return _playTestDebug->CreateRootNode();
+		}
+#endif
+		return std::make_unique<SceneNode>();
+	}
+
 	void LevelHandler::AttachComponents(LevelDescriptor&& descriptor)
 	{
 		ZoneScopedC(0x4876AF);
 
-		_levelDisplayName = std::move(descriptor.DisplayName);
+		_levelDisplayName = Death::move(descriptor.DisplayName);
 
 		LOGI("Level \"{}\" (from \"{}.j2l\") loaded", _levelDisplayName, _levelName);
 
@@ -648,14 +682,14 @@ namespace Jazz2
 			theApplication().GetGfxDevice().setWindowTitle(NCINE_APP_NAME);
 		}
 
-		_defaultNextLevel = std::move(descriptor.NextLevel);
-		_defaultSecretLevel = std::move(descriptor.SecretLevel);
+		_defaultNextLevel = Death::move(descriptor.NextLevel);
+		_defaultSecretLevel = Death::move(descriptor.SecretLevel);
 
-		_tileMap = std::move(descriptor.TileMap);
+		_tileMap = Death::move(descriptor.TileMap);
 		_tileMap->SetOwner(this);
 		_tileMap->setParent(_rootNode.get());
 
-		_eventMap = std::move(descriptor.EventMap);
+		_eventMap = Death::move(descriptor.EventMap);
 		_eventMap->SetLevelHandler(this);
 
 		Vector2i levelBounds = _tileMap->GetLevelBounds();
@@ -668,7 +702,7 @@ namespace Jazz2
 		_weatherIntensity = descriptor.WeatherIntensity;
 		_waterLevel = descriptor.WaterLevel;
 
-		_musicCurrentPath = std::move(descriptor.MusicPath);
+		_musicCurrentPath = Death::move(descriptor.MusicPath);
 		_musicDefaultPath = _musicCurrentPath;
 
 #if defined(WITH_AUDIO)
@@ -687,12 +721,24 @@ namespace Jazz2
 		}
 #endif
 
-		_levelTexts = std::move(descriptor.LevelTexts);
-#if defined(WITH_EDITOR)
-		_levelEditable = descriptor.Editable;
+		_levelTexts = Death::move(descriptor.LevelTexts);
+		_localizedLevelTexts = Death::move(descriptor.LocalizedTexts);
+		_scriptTexts = Death::move(descriptor.ScriptTexts);
+		_customWeapons = Death::move(descriptor.CustomWeapons);
+#if defined(WITH_ANGELSCRIPT)
+		_tileDiffuseOverrides = Death::move(descriptor.TileDiffuseOverrides);
+		_spriteRecolors = Death::move(descriptor.SpriteRecolors);
 #endif
 
 		LoadLevelScripts(descriptor.FullPath);
+
+#if defined(WITH_ANGELSCRIPT)
+		if (_scripts == nullptr) {
+			// Only a script reads them, the tile map has them already
+			_tileDiffuseOverrides = {};
+			_spriteRecolors = {};
+		}
+#endif
 
 #if defined(DEATH_TARGET_DREAMCAST)
 		// The heap window is the binding constraint of this console and a level is the largest thing that
@@ -738,7 +784,7 @@ namespace Jazz2
 		// is a *lift* - both spend their margin at the top. No other side can take one: the player is meant to
 		// be standing on solid floor, so a margin below would reject every ground-level spawn there is.
 		//
-		// 4 px was tried first and changes nothing on the level this was reported from: `rescue/02_colon2`
+		// 4 px was tried first and changes nothing on the level this was reported from: `rescue/colon2`
 		// starts in a space barely taller than the player, and the half-strength offset there clears 4 but
 		// not 8.
 		constexpr float SpawnHeadroom = 8.0f;
@@ -829,10 +875,16 @@ namespace Jazz2
 		ZoneScopedC(0x4876AF);
 
 		float timeMult = theApplication().GetTimeMult();
+#if defined(WITH_EDITOR)
+		if DEATH_UNLIKELY(_playTestDebug != nullptr) {
+			// The time of the level runs slower, or stands still, while the play-test asks for it
+			timeMult = _playTestDebug->BeginFrame(timeMult);
+		}
+#endif
 
 #if defined(DEATH_DEBUG)
 		if DEATH_UNLIKELY(!_debugStartupCommands.empty()) {
-			auto commands = std::move(_debugStartupCommands);
+			auto commands = Death::move(_debugStartupCommands);
 			_debugStartupCommands = {};
 			for (const String& command : commands) {
 				OnConsoleCommand(command);
@@ -915,7 +967,12 @@ namespace Jazz2
 		}
 #endif
 
-		if DEATH_LIKELY(!IsPausable() || _pauseMenu == nullptr) {
+		bool levelTimeRuns = (!IsPausable() || _pauseMenu == nullptr);
+#if defined(WITH_EDITOR)
+		// Nothing of the level goes on in a frame its time stands still in, see Editor::PlayTestDebug::Step()
+		levelTimeRuns = (levelTimeRuns && (_playTestDebug == nullptr || !_playTestDebug->IsFrameFrozen()));
+#endif
+		if DEATH_LIKELY(levelTimeRuns) {
 			if (_nextLevelType != ExitType::None) {
 				_nextLevelTime -= timeMult;
 				ProcessQueuedNextLevel();
@@ -949,11 +1006,27 @@ namespace Jazz2
 		}
 	}
 
+	void LevelHandler::OnReplacing()
+	{
+#if defined(WITH_ANGELSCRIPT)
+		// The sprites a script redrew are the ones every level draws, the next level gets them as they were
+		if (_scripts != nullptr) {
+			_scripts->OnReplacing();
+		}
+#endif
+	}
+
 	void LevelHandler::OnEndFrame()
 	{
 		ZoneScopedC(0x4876AF);
 
 		float timeMult = theApplication().GetTimeMult();
+#if defined(WITH_EDITOR)
+		if DEATH_UNLIKELY(_playTestDebug != nullptr) {
+			// The same as at the beginning of the frame, see Editor::PlayTestDebug::BeginFrame()
+			timeMult = _playTestDebug->GetFrameTimeMult(timeMult);
+		}
+#endif
 		auto& resolver = ContentResolver::Get();
 
 		if DEATH_UNLIKELY(_checkpointSnapshotPending) {
@@ -974,7 +1047,15 @@ namespace Jazz2
 				}
 			}
 
+#if defined(WITH_EDITOR)
+			// Nothing touches anything in a frame the time of the play-test stands still in, but what is moved by hand
+			// (see Editor::PlayTestDebug::TeleportPlayer()) is still shown where it is now and the camera still follows it
+			if DEATH_LIKELY(_playTestDebug == nullptr || !_playTestDebug->IsFrameFrozen()) {
+				ResolveCollisions(timeMult);
+			}
+#else
 			ResolveCollisions(timeMult);
+#endif
 
 			if (!resolver.IsHeadless()) {
 #if defined(NCINE_HAS_GAMEPAD_RUMBLE)
@@ -1117,6 +1198,11 @@ namespace Jazz2
 		if (_console != nullptr) {
 			_console->setParent(hudParent);
 		}
+#if defined(WITH_EDITOR)
+		if (_playTestDebug != nullptr) {
+			_playTestDebug->UpdateOverlay();
+		}
+#endif
 
 		// Acquired on every tier: the console fixed-function backends need this program bound for the water
 		// description in its fixed_function block to run at all, exactly as the shader path needs it for the
@@ -1171,6 +1257,7 @@ namespace Jazz2
 	{
 		if (line == "/help"_s) {
 			_console->WriteLine(UI::MessageLevel::Echo, line);
+			// TRANSLATORS: Reply to the /help command in the console, followed by a link to the website
 			_console->WriteLine(UI::MessageLevel::Confirm, _("For more information, visit the official website:") + " \f[w:80]\f[c:#707070]https://de4th.dev/jazz2/help\f[/c]\f[/w]"_s);
 			return true;
 		}
@@ -1196,6 +1283,30 @@ namespace Jazz2
 		if DEATH_UNLIKELY(_pauseMenu != nullptr) {
 			_pauseMenu->OnKeyReleased(event);
 		}
+	}
+
+	void LevelHandler::ResetPressedKeys(bool fromKeyboard)
+	{
+		const KeyboardState& keyboard = theApplication().GetInputManager().keyboardState();
+		for (std::int32_t i = 0; i < (std::int32_t)Keys::Count; i++) {
+			if (fromKeyboard && keyboard.isKeyDown((Keys)i)) {
+				_pressedKeys.set((std::size_t)i);
+			} else {
+				_pressedKeys.reset((std::size_t)i);
+			}
+		}
+	}
+
+	float LevelHandler::GetLevelTimeMult() const
+	{
+		float timeMult = theApplication().GetTimeMult();
+#if defined(WITH_EDITOR)
+		if DEATH_UNLIKELY(_playTestDebug != nullptr) {
+			// The same as the objects of the level get, see Editor::PlayTestDebug::BeginFrame()
+			timeMult = _playTestDebug->GetFrameTimeMult(timeMult);
+		}
+#endif
+		return timeMult;
 	}
 
 	void LevelHandler::OnTextInput(const TextInputEvent& event)
@@ -1228,7 +1339,14 @@ namespace Jazz2
 			actor->_collisionProxyID = _collisions.CreateProxy(actor->AABB, actor.get());
 		}
 
-		_actors.push_back(std::move(actor));
+#if defined(WITH_ANGELSCRIPT)
+		// The objects of events become objects of the level script, which may drive them by its own behaviors
+		if (_scripts != nullptr) {
+			_scripts->OnActorAdded(actor);
+		}
+#endif
+
+		_actors.push_back(Death::move(actor));
 	}
 
 	std::shared_ptr<AudioBufferPlayer> LevelHandler::PlaySfx(Actors::ActorBase* self, StringView identifier, AudioBuffer* buffer, const Vector3f& pos, bool sourceRelative, float gain, float pitch, SfxFlags flags)
@@ -1351,6 +1469,13 @@ namespace Jazz2
 
 				auto* solidObject = runtime_cast<Actors::SolidObjectBase>(actor);
 				if (solidObject == nullptr || !solidObject->IsOneWay || params.Downwards) {
+#if defined(WITH_ANGELSCRIPT)
+					// An object a level script drives may handle the collision itself, it stays solid
+					if (Actors::ActorBase::HandleCollisionByOverride(self, actor)) {
+						colliderActor = actor;
+						return false;
+					}
+#endif
 					if (!self->OnHandleCollision(actor) && !actor->OnHandleCollision(self)) {
 						colliderActor = actor;
 						return false;
@@ -1453,6 +1578,15 @@ namespace Jazz2
 					}
 
 					if (_activeBoss == nullptr) {
+#if defined(WITH_ANGELSCRIPT)
+						// A boss of a script is an object the script drives, it only learns the boss is activated
+						if (_scripts != nullptr && _scripts->OnBossAreaActivated()) {
+							if (eventParams != nullptr) {
+								BeginPlayMusic(StringView((const char*)eventParams, strnlen((const char*)eventParams, 16)));
+							}
+							return;
+						}
+#endif
 						// No boss was found, it's probably a bug in the level, so go to the next level
 						LOGW("No boss was found, skipping to the next level");
 						BeginLevelChange(nullptr, ExitType::Boss);
@@ -1506,7 +1640,7 @@ namespace Jazz2
 				SerializeLevelState(dest, targetLevel);
 				auto state = std::make_shared<LevelStateSnapshot>();
 				AssignSnapshotData(*state, dest);
-				_leftLevelState = std::move(state);
+				_leftLevelState = Death::move(state);
 				LOGI("Level \"{}\" is a special level, the current state was saved ({} bytes)", targetLevel, _leftLevelState->size());
 			}
 		}
@@ -1573,7 +1707,7 @@ namespace Jazz2
 
 	void LevelHandler::HandleLevelChange(LevelInitialization&& levelInit)
 	{
-		_root->ChangeLevel(std::move(levelInit));
+		_root->ChangeLevel(Death::move(levelInit));
 	}
 
 	void LevelHandler::HandleGameOver(Actors::Player* player)
@@ -1581,7 +1715,7 @@ namespace Jazz2
 		LevelInitialization levelInit;
 		PrepareNextLevelInitialization(levelInit);
 		levelInit.LevelName = ":gameover"_s;
-		HandleLevelChange(std::move(levelInit));
+		HandleLevelChange(Death::move(levelInit));
 	}
 
 	bool LevelHandler::HandlePlayerDied(Actors::Player* player)
@@ -1753,7 +1887,7 @@ namespace Jazz2
 		// Used only in derived classes
 	}
 
-	void LevelHandler::HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count)
+	void LevelHandler::HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count, float elasticity)
 	{
 		// Used only in derived classes
 	}
@@ -1770,6 +1904,17 @@ namespace Jazz2
 		}
 
 		StringView text = _levelTexts[textId];
+		// The level's own translation to the language of the game comes first, without one the text may be in
+		// the translations of the game, looked up by the level name below
+		bool translated = false;
+		if (!_localizedLevelTexts.empty()) {
+			StringView language = (PreferencesCache::Language[0] != '\0' ? StringView(PreferencesCache::Language) : "en"_s);
+			const LocalizedLevelTexts* localized = Formats::LevelTextsChunk::Find(_localizedLevelTexts, language);
+			if (localized != nullptr && textId < localized->Texts.size() && !localized->Texts[textId].empty()) {
+				text = localized->Texts[textId];
+				translated = true;
+			}
+		}
 		std::int32_t textSize = (std::int32_t)text.size();
 
 		if (textSize > 0 && index >= 0) {
@@ -1798,11 +1943,18 @@ namespace Jazz2
 			}
 		}
 
-		return _x(_levelName, text.data());
+		return (translated ? text : _x(_levelName, text.data()));
 	}
 
 	void LevelHandler::OverrideLevelText(std::uint32_t textId, StringView value)
 	{
+		// The text set now is shown as it is, a translation of the one it replaces would hide it
+		for (LocalizedLevelTexts& localized : _localizedLevelTexts) {
+			if (textId < localized.Texts.size()) {
+				localized.Texts[textId] = {};
+			}
+		}
+
 		if (textId >= _levelTexts.size()) {
 			if (value.empty()) {
 				return;
@@ -1812,6 +1964,19 @@ namespace Jazz2
 		}
 
 		_levelTexts[textId] = value;
+	}
+
+	StringView LevelHandler::GetScriptText(std::uint32_t textId)
+	{
+		return (textId < _scriptTexts.size() && !_scriptTexts[textId].empty() ? StringView(_scriptTexts[textId]) : GetLevelText(textId));
+	}
+
+	void LevelHandler::OverrideScriptText(std::uint32_t textId, StringView value)
+	{
+		if (textId >= _scriptTexts.size()) {
+			_scriptTexts.resize(textId + 1);
+		}
+		_scriptTexts[textId] = value;
 	}
 
 	bool LevelHandler::PlayerActionPressed(Actors::Player* player, PlayerAction action, bool includeGamepads)
@@ -1948,18 +2113,6 @@ namespace Jazz2
 	}
 
 #if defined(WITH_EDITOR)
-	bool LevelHandler::CanOpenInEditor() const
-	{
-		return (_levelEditable && IsLocalSession());
-	}
-
-	void LevelHandler::OpenInEditor()
-	{
-		Editor::EditorInitialization editorInit;
-		editorInit.LevelName = _levelName;
-		_root->OpenEditor(std::move(editorInit));
-	}
-
 	void LevelHandler::SuspendRendering()
 	{
 		_upscalePass.Detach();
@@ -1972,7 +2125,7 @@ namespace Jazz2
 		if (_music == nullptr || _musicCurrentPath != target._musicCurrentPath) {
 			return false;
 		}
-		target._music = std::move(_music);
+		target._music = Death::move(_music);
 		target._musicStartDelay = 0;
 		target._music->setLowPass(lowPass);
 		if (target._music->isStopped() || target._music->isPaused()) {
@@ -1986,7 +2139,7 @@ namespace Jazz2
 	{
 		path = _musicCurrentPath;
 		_musicStartDelay = 0;
-		return std::move(_music);
+		return Death::move(_music);
 	}
 
 	bool LevelHandler::ContinueMusic(std::unique_ptr<AudioStreamPlayer>& music, StringView path, float lowPass)
@@ -1994,7 +2147,7 @@ namespace Jazz2
 		if (music == nullptr || path != _musicCurrentPath) {
 			return false;
 		}
-		_music = std::move(music);
+		_music = Death::move(music);
 		_musicStartDelay = 0;
 		_music->setLowPass(lowPass);
 		if (_music->isStopped() || _music->isPaused()) {
@@ -2097,7 +2250,13 @@ namespace Jazz2
 				continue;
 			}
 
-			if (actor->GetState(Actors::ActorState::Initialized) && actor->IsSerializable() && _eventSpawner.CanSpawn(actor->_spawnEventType)) {
+			bool drivenByScript = false;
+#if defined(WITH_ANGELSCRIPT)
+			// What a level script drives is made again by its events and by the script, as JJ2+ starts all objects again after
+			// a death - a stored copy came back next to them, after every death once more
+			drivenByScript = (actor->GetUpdateOverride() != nullptr);
+#endif
+			if (!drivenByScript && actor->GetState(Actors::ActorState::Initialized) && actor->IsSerializable() && _eventSpawner.CanSpawn(actor->_spawnEventType)) {
 				serializable.push_back(actor.get());
 			} else if ((actor->_state & (Actors::ActorState::IsCreatedFromEventMap | Actors::ActorState::IsFromGenerator)) != Actors::ActorState::None) {
 				// Objects that cannot be stored are spawned again from their events, the others are transient
@@ -2225,7 +2384,7 @@ namespace Jazz2
 		dest.WriteValue<std::uint8_t>((std::uint8_t)_players.size());
 		for (Actors::Player* player : _players) {
 			dest.WriteValue<std::uint8_t>(player->GetPlayerIndex());
-			dest.WriteValue<std::uint8_t>((std::uint8_t)player->GetPlayerType());
+			dest.WriteValue<std::uint8_t>((std::uint8_t)player->GetPersistentPlayerType());
 			MemoryStream playerState(512);
 			static_cast<Actors::ActorBase*>(player)->OnSerializeState(playerState);
 			dest.WriteVariableUint32((std::uint32_t)playerState.GetSize());
@@ -2287,7 +2446,7 @@ namespace Jazz2
 		_noiseTexture = resolver.GetNoiseTexture();
 #endif
 
-		_rootNode = std::make_unique<SceneNode>();
+		_rootNode = CreateRootNode();
 		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
@@ -2298,12 +2457,13 @@ namespace Jazz2
 			return false;
 		}
 
+		// TRANSLATORS: Debug message in the console when a level is restored from a saved state, {} is level name
 		_console->WriteLine(UI::MessageLevel::Debug, _f("Level \"{}\" restored", descriptor.DisplayName));
 
 		// The music that was playing when the level was left is started instead of the default one
 		descriptor.MusicPath = musicCurrentPath;
-		AttachComponents(std::move(descriptor));
-		_musicDefaultPath = std::move(musicDefaultPath);
+		AttachComponents(Death::move(descriptor));
+		_musicDefaultPath = Death::move(musicDefaultPath);
 		_waterLevel = waterLevel;
 		_weatherType = weatherType;
 		_weatherIntensity = weatherIntensity;
@@ -2358,7 +2518,7 @@ namespace Jazz2
 		LevelStateSnapshot returnLevelState;
 		ReadSnapshotData(src, returnLevelState);
 		if (!returnLevelState.empty()) {
-			_returnLevelState = std::make_shared<LevelStateSnapshot>(std::move(returnLevelState));
+			_returnLevelState = std::make_shared<LevelStateSnapshot>(Death::move(returnLevelState));
 		}
 
 		if (version >= 2) {
@@ -2532,7 +2692,7 @@ namespace Jazz2
 		if (playersReady && _nextLevelTime <= 0.0f) {
 			LevelInitialization levelInit;
 			PrepareNextLevelInitialization(levelInit);
-			HandleLevelChange(std::move(levelInit));
+			HandleLevelChange(Death::move(levelInit));
 		}
 	}
 
@@ -2544,7 +2704,7 @@ namespace Jazz2
 			levelInit.LevelName = ReadLevelStateName(*_returnLevelState);
 			levelInit.RestoreLevelState = _returnLevelState;
 		} else {
-			levelInit.LevelName = std::move(nextLevel);
+			levelInit.LevelName = Death::move(nextLevel);
 			levelInit.ReturnLevelState = _leftLevelState;
 		}
 
@@ -2618,7 +2778,7 @@ namespace Jazz2
 			}
 
 			if (!found) {
-				playerZones.push_back(std::move(cullingRect));
+				playerZones.push_back(Death::move(cullingRect));
 			}
 		}
 
@@ -2769,6 +2929,12 @@ namespace Jazz2
 				// the plain overlap test at the end positions cannot see (a spring or another small object
 				// is easy to jump clean over at a low frame rate)
 				if (actorA->IsCollidingWith(actorB) || actorA->HasCrossedOver(actorB) || actorB->HasCrossedOver(actorA)) {
+#if defined(WITH_ANGELSCRIPT)
+					// An object a level script drives may handle the collision itself
+					if (Actors::ActorBase::HandleCollisionByOverride(actorA, actorB)) {
+						return;
+					}
+#endif
 					if (!actorA->OnHandleCollision(actorB)) {
 						actorB->OnHandleCollision(actorA);
 					}
@@ -2943,13 +3109,27 @@ namespace Jazz2
 		}
 	}
 
-	void LevelHandler::OverrideCameraView(Actors::Player* player, float x, float y, bool topLeft)
+	void LevelHandler::OverrideCameraView(Actors::Player* player, CameraOverride modeX, float x, CameraOverride modeY, float y,
+		bool centered, bool instant)
 	{
 		for (auto& viewport : _assignedViewports) {
 			if (viewport->_targetActor == player) {
-				viewport->OverrideCamera(x, y, topLeft);
+				viewport->OverrideCamera(modeX, x, modeY, y, centered, instant);
 			}
 		}
+	}
+
+	Rectf LevelHandler::GetCameraView(Actors::Player* player) const
+	{
+		// The view is placed by its center, half of it from there in whole pixels (see PlayerViewport::UpdateCamera())
+		for (auto& viewport : _assignedViewports) {
+			if (viewport->_targetActor == player) {
+				Vector2i size = viewport->GetViewportSize();
+				return Rectf(viewport->_cameraPos.X - float(size.X / 2), viewport->_cameraPos.Y - float(size.Y / 2), float(size.X), float(size.Y));
+			}
+		}
+		Vector2i size = GetViewSize();
+		return Rectf(-float(size.X / 2), -float(size.Y / 2), float(size.X), float(size.Y));
 	}
 
 	void LevelHandler::ShakeCameraView(Actors::Player* player, float duration)
@@ -3100,43 +3280,43 @@ namespace Jazz2
 
 		UI::DiscordRpcClient::RichPresence richPresence;
 		if (p[0] == "prince"_s) {
-			if (p[2] == "01_castle1"_s || p[2] == "02_castle1n"_s) {
+			if (p[2] == "castle1"_s || p[2] == "castle1n"_s) {
 				richPresence.LargeImage = "level-prince-01"_s;
-			} else if (p[2] == "03_carrot1"_s || p[2] == "04_carrot1n"_s) {
+			} else if (p[2] == "carrot1"_s || p[2] == "carrot1n"_s) {
 				richPresence.LargeImage = "level-prince-02"_s;
-			} else if (p[2] == "05_labrat1"_s || p[2] == "06_labrat2"_s || p[2] == "bonus_labrat3"_s) {
+			} else if (p[2] == "labrat1"_s || p[2] == "labrat2"_s || p[2] == "labrat3"_s) {
 				richPresence.LargeImage = "level-prince-03"_s;
 			}
 		} else if (p[0] == "rescue"_s) {
-			if (p[2] == "01_colon1"_s || p[2] == "02_colon2"_s) {
+			if (p[2] == "colon1"_s || p[2] == "colon2"_s) {
 				richPresence.LargeImage = "level-rescue-01"_s;
-			} else if (p[2] == "03_psych1"_s || p[2] == "04_psych2"_s || p[2] == "bonus_psych3"_s) {
+			} else if (p[2] == "psych1"_s || p[2] == "psych2"_s || p[2] == "psych3"_s) {
 				richPresence.LargeImage = "level-rescue-02"_s;
-			} else if (p[2] == "05_beach"_s || p[2] == "06_beach2"_s) {
+			} else if (p[2] == "beach"_s || p[2] == "beach2"_s) {
 				richPresence.LargeImage = "level-rescue-03"_s;
 			}
 		} else if (p[0] == "flash"_s) {
-			if (p[2] == "01_diam1"_s || p[2] == "02_diam3"_s) {
+			if (p[2] == "diam1"_s || p[2] == "diam3"_s) {
 				richPresence.LargeImage = "level-flash-01"_s;
-			} else if (p[2] == "03_tube1"_s || p[2] == "04_tube2"_s || p[2] == "bonus_tube3"_s) {
+			} else if (p[2] == "tube1"_s || p[2] == "tube2"_s || p[2] == "tube3"_s) {
 				richPresence.LargeImage = "level-flash-02"_s;
-			} else if (p[2] == "05_medivo1"_s || p[2] == "06_medivo2"_s || p[2] == "bonus_garglair"_s) {
+			} else if (p[2] == "medivo1"_s || p[2] == "medivo2"_s || p[2] == "garglair"_s) {
 				richPresence.LargeImage = "level-flash-03"_s;
 			}
 		} else if (p[0] == "monk"_s) {
-			if (p[2] == "01_jung1"_s || p[2] == "02_jung2"_s) {
+			if (p[2] == "jung1"_s || p[2] == "jung2"_s) {
 				richPresence.LargeImage = "level-monk-01"_s;
-			} else if (p[2] == "03_hell"_s || p[2] == "04_hell2"_s) {
+			} else if (p[2] == "hell"_s || p[2] == "hell2"_s) {
 				richPresence.LargeImage = "level-monk-02"_s;
-			} else if (p[2] == "05_damn"_s || p[2] == "06_damn2"_s) {
+			} else if (p[2] == "damn"_s || p[2] == "damn2"_s) {
 				richPresence.LargeImage = "level-monk-03"_s;
 			}
 		} else if (p[0] == "secretf"_s) {
-			if (p[2] == "01_easter1"_s || p[2] == "02_easter2"_s || p[2] == "03_easter3"_s) {
+			if (p[2] == "easter1"_s || p[2] == "easter2"_s || p[2] == "easter3"_s) {
 				richPresence.LargeImage = "level-secretf-01"_s;
-			} else if (p[2] == "04_haunted1"_s || p[2] == "05_haunted2"_s || p[2] == "06_haunted3"_s) {
+			} else if (p[2] == "haunted1"_s || p[2] == "haunted2"_s || p[2] == "haunted3"_s) {
 				richPresence.LargeImage = "level-secretf-02"_s;
-			} else if (p[2] == "07_town1"_s || p[2] == "08_town2"_s || p[2] == "09_town3"_s) {
+			} else if (p[2] == "town1"_s || p[2] == "town2"_s || p[2] == "town3"_s) {
 				richPresence.LargeImage = "level-secretf-03"_s;
 			}
 		} else if (p[0] == "xmas98"_s || p[0] == "xmas99"_s) {
@@ -3255,11 +3435,7 @@ namespace Jazz2
 			_music->setLowPass(0.1f);
 		}
 		if (IsPausable()) {
-			for (auto& sound : _playingSounds) {
-				if (sound->isPlaying()) {
-					sound->pause();
-				}
-			}
+			PauseAllSfx();
 			// If Sugar Rush music is playing, pause it and play normal music instead
 			if (_sugarRushMusic != nullptr && _music != nullptr) {
 				_music->play();
@@ -3281,11 +3457,7 @@ namespace Jazz2
 			_music->pause();
 		}
 		// Resume all SFX
-		for (auto& sound : _playingSounds) {
-			if (sound->isPaused()) {
-				sound->play();
-			}
-		}
+		ResumeAllSfx();
 		if (_music != nullptr) {
 			_music->setLowPass(1.0f);
 		}
@@ -3296,6 +3468,28 @@ namespace Jazz2
 			input.PressedActions |= (1ull << (std::int32_t)PlayerAction::Menu);
 			input.PressedActionsLast |= (1ull << (std::int32_t)PlayerAction::Menu);
 		}
+	}
+
+	void LevelHandler::PauseAllSfx()
+	{
+#if defined(WITH_AUDIO)
+		for (auto& sound : _playingSounds) {
+			if (sound->isPlaying()) {
+				sound->pause();
+			}
+		}
+#endif
+	}
+
+	void LevelHandler::ResumeAllSfx()
+	{
+#if defined(WITH_AUDIO)
+		for (auto& sound : _playingSounds) {
+			if (sound->isPaused()) {
+				sound->play();
+			}
+		}
+#endif
 	}
 
 	void LevelHandler::ShowConsole()
@@ -3435,15 +3629,29 @@ namespace Jazz2
 
 	void LevelHandler::CheatMorph(ArrayView<Actors::Player* const> targets)
 	{
-		PlayerType newType;
-		switch (targets[0]->GetPlayerType()) {
-			case PlayerType::Jazz: newType = PlayerType::Spaz; break;
-			case PlayerType::Spaz: newType = PlayerType::Lori; break;
-			default: newType = PlayerType::Jazz; break;
-		}
+		// The original's own cycle, JJ2+ documents it as Jazz - Spaz - Lori - Bird - Frog - Bird2. The second bird is also
+		// what the bird monitor gives, see PowerUpMorphMonitor.
+		const auto nextType = [](PlayerType type) {
+			switch (type) {
+				case PlayerType::Jazz: return PlayerType::Spaz;
+				case PlayerType::Spaz: return PlayerType::Lori;
+				case PlayerType::Lori: return PlayerType::Bird;
+				case PlayerType::Bird: return PlayerType::Frog;
+				case PlayerType::Frog: return PlayerType::Bird2;
+				default: return PlayerType::Jazz;
+			}
+		};
 
-		if (!targets[0]->MorphTo(newType)) {
-			targets[0]->MorphTo(PlayerType::Jazz);
+		// A character whose sprites aren't available (as in the shareware data) is skipped, MorphTo() refuses it, the next one
+		// of the cycle is tried, around to where it started at most
+		Actors::Player* player = targets[0];
+		PlayerType currentType = player->GetPlayerType();
+		PlayerType newType = currentType;
+		for (std::int32_t i = 0; i < 6; i++) {
+			newType = nextType(newType);
+			if (newType == currentType || player->MorphTo(newType)) {
+				break;
+			}
 		}
 	}
 

@@ -60,6 +60,8 @@ namespace Jazz2::UI
 		static constexpr AnimState CharacterSpaz = (AnimState)61;
 		static constexpr AnimState CharacterLori = (AnimState)62;
 		static constexpr AnimState CharacterFrog = (AnimState)63;
+		static constexpr AnimState CharacterBird = (AnimState)64;
+		static constexpr AnimState CharacterBird2 = (AnimState)65;
 		static constexpr AnimState Heart = (AnimState)70;
 		static constexpr AnimState PickupGemRed = (AnimState)71;
 		static constexpr AnimState PickupGemGreen = (AnimState)72;
@@ -518,6 +520,12 @@ namespace Jazz2::UI
 
 		_levelText = text;
 		_levelTextTime = 0.0f;
+		_levelTextScale = 1.0f;
+	}
+
+	void HUD::SetLevelTextScale(float scale)
+	{
+		_levelTextScale = scale;
 	}
 
 	void HUD::ShowCoins(std::int32_t count)
@@ -607,6 +615,7 @@ namespace Jazz2::UI
 		std::int32_t charOffset = 0, charOffsetShadow = 0;
 
 		if DEATH_UNLIKELY(player->_playerType == PlayerType::Spectate) {
+			// TRANSLATORS: Shown in the HUD while spectating in multiplayer, may be followed by the name of the watched player
 			auto spectateText = _("Spectating");
 			if constexpr (Font::ShadowsEnabled) {
 				_smallFont->DrawString(this, spectateText, charOffsetShadow, view.X + 10.0f, view.Y + 6.0f + 2.0f, FontShadowLayer,
@@ -633,6 +642,17 @@ namespace Jazz2::UI
 			case PlayerType::Spaz: playerIcon = CharacterSpaz; break;
 			case PlayerType::Lori: playerIcon = CharacterLori; break;
 			case PlayerType::Frog: playerIcon = CharacterFrog; break;
+			case PlayerType::Bird: playerIcon = CharacterBird; break;
+			case PlayerType::Bird2: playerIcon = CharacterBird2; break;
+		}
+		// Either bird shows its own icon, or the one of the character it was if the content has none
+		if (player->IsBird() && _metadata->FindAnimation(playerIcon) == nullptr) {
+			switch (player->GetPlayerTypeBeforeMorph()) {
+				default:
+				case PlayerType::Jazz: playerIcon = CharacterJazz; break;
+				case PlayerType::Spaz: playerIcon = CharacterSpaz; break;
+				case PlayerType::Lori: playerIcon = CharacterLori; break;
+			}
 		}
 
 		std::int32_t health = player->GetHealth();
@@ -848,7 +868,8 @@ namespace Jazz2::UI
 		}
 #endif
 
-		if (!player->_weaponAllowed || player->_playerType == PlayerType::Frog) {
+		// The frog and the first bird have no weapon, the second bird shoots the player's
+		if (!player->_weaponAllowed || player->_playerType == PlayerType::Frog || player->_playerType == PlayerType::Bird) {
 			return;
 		}
 
@@ -965,7 +986,7 @@ namespace Jazz2::UI
 
 		// The scale is a legibility threshold for a small display, so it stays keyed to the display and not to
 		// the rectangle the text is laid out in
-		float textScale = (ViewSize.X >= 360 ? 1.0f : 0.8f);
+		float textScale = (ViewSize.X >= 360 ? 1.0f : 0.8f) * _levelTextScale;
 
 		Rectf safeView = GetSafeView();
 		float x = safeView.X + safeView.W * 0.5f + offset;
@@ -1507,13 +1528,15 @@ namespace Jazz2::UI
 			offset.X += 6;
 		}
 
+		// A bird has no blaster of its own to show, it fires the one of the character it was
+		PlayerType blasterType = player->GetPersistentPlayerType();
 		if ((player->_inventory.WeaponUpgrades[(std::int32_t)weapon] & 0x01) != 0) {
 			switch (weapon) {
 				default:
 				case WeaponType::Blaster:
-					if (player->_playerType == PlayerType::Spaz) {
+					if (blasterType == PlayerType::Spaz) {
 						return WeaponPowerUpBlasterSpaz;
-					} else if (player->_playerType == PlayerType::Lori) {
+					} else if (blasterType == PlayerType::Lori) {
 						return WeaponPowerUpBlasterLori;
 					} else {
 						return WeaponPowerUpBlasterJazz;
@@ -1533,9 +1556,9 @@ namespace Jazz2::UI
 			switch (weapon) {
 				default:
 				case WeaponType::Blaster:
-					if (player->_playerType == PlayerType::Spaz) {
+					if (blasterType == PlayerType::Spaz) {
 						return WeaponBlasterSpaz;
-					} else if (player->_playerType == PlayerType::Lori) {
+					} else if (blasterType == PlayerType::Lori) {
 						return WeaponBlasterLori;
 					} else {
 						return WeaponBlasterJazz;
@@ -1807,7 +1830,8 @@ namespace Jazz2::UI
 		auto& state = _weaponWheel[player->_playerIndex];
 
 		if (PreferencesCache::WeaponWheel == WeaponWheelStyle::Disabled || player == nullptr ||
-			!((player->_controllable && player->_controllableExternal) || !_levelHandler->IsReforged()) || player->_playerType == PlayerType::Frog) {
+			!((player->_controllable && player->_controllableExternal) || !_levelHandler->IsReforged()) ||
+			player->_playerType == PlayerType::Frog || player->_playerType == PlayerType::Bird) {
 			if (state.Anim > 0.0f) {
 				state.Shown = false;
 				state.LastIndex = -1;

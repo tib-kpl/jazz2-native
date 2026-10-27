@@ -264,9 +264,20 @@ namespace Jazz2
 		 * @brief Keeps a metadata loaded with everything it uses, even across loadings that don't request it
 		 *
 		 * Everything not requested while something is loaded is released at the end of it (see @ref BeginLoading()).
-		 * The level editor keeps the sprites of its previews this way while it loads a level to play it.
+		 * The level editor keeps the sprites of its previews this way while it loads a level to play it. Pins are
+		 * counted, the metadata stays pinned until it was unpinned as many times as it was pinned.
 		 */
 		void PinMetadata(Metadata* metadata, bool pinned);
+		/**
+		 * @brief Keeps everything loaded across the loadings that follow, until @ref ReleaseLoadedResources()
+		 *
+		 * Nothing is released at the end of a loading while any is held, also what was loaded since, see
+		 * @ref BeginLoading(). Calls are counted, each is paired with @ref ReleaseLoadedResources(). The level editor
+		 * keeps the level played this way while it loads the level it shows, or another one to play.
+		 */
+		void RetainLoadedResources();
+		/** @brief Lets the resources go again after @ref RetainLoadedResources(), they're released by the next loading that doesn't request them */
+		void ReleaseLoadedResources();
 		/**
 		 * @brief Loads specified graphics asset (cached)
 		 *
@@ -275,6 +286,20 @@ namespace Jazz2
 		 * @param keepIndexed    Keep raw palette indices in the texture (don't bake the palette) for shader recoloring
 		 */
 		GenericGraphicResource* RequestGraphics(StringView path, std::uint16_t paletteOffset, bool keepIndexed = false);
+		/**
+		 * @brief Returns whether graphics @ref RequestGraphics() gave are still loaded, @ref EndLoading() frees them once nothing requested them
+		 *
+		 * The graphics aren't touched, so it can be asked of graphics that may be gone already. The arguments are those
+		 * of @ref RequestGraphics() (the palette offset of graphics kept indexed doesn't matter).
+		 */
+		bool IsGraphicsCached(const GenericGraphicResource* graphics, StringView path, std::uint16_t paletteOffset, bool keepIndexed = false) const;
+		/**
+		 * @brief Returns the path loaded graphics were requested by (see @ref RequestGraphics()), or an empty string
+		 *
+		 * The separators are those of the platform. Every loaded graphics is looked at, so it's for a caller that keeps
+		 * what it found.
+		 */
+		String FindGraphicsPath(const GenericGraphicResource* graphics) const;
 		/**
 		 * @brief Loads the graphics of a deferred animation entry and returns whether they are ready to be drawn
 		 *
@@ -352,8 +377,71 @@ namespace Jazz2
 		 */
 		std::int32_t AcquirePaletteOffset(std::uint32_t furColor, PlayerType playerType);
 		/**
-		 * @brief Releases one reference to a palette offset from @ref AcquirePaletteOffset
+		 * @brief Acquires a reference-counted palette offset of the sprite palette shifted by @p shift entries
 		 *
+		 * Index `i` of the row is the color of index `(i + shift) & 255` of the sprite palette, index 0 stays the
+		 * transparent one, and a pixel moved onto index 0 gets its color fully opaque, as `SPRITE::PALSHIFT` of JJ2+
+		 * draws it (see @ref Tiles::LayerRendererType::PaletteShift). The row is built again whenever the sprite
+		 * palette changes. Callers with the same shift share one row. Returns 0 (the sprite palette itself) for a
+		 * shift of 0, otherwise the offset, or -1 if no row is free. Release it with @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireShiftedPaletteOffset(std::uint8_t shift);
+		/**
+		 * @brief Acquires a reference-counted palette offset of the sprite palette in a single hue of it
+		 *
+		 * Index `i` of the row is the color of index `gradientStart + (i & 7)` of the sprite palette, the gradient of 8
+		 * entries from @p gradientStart in place of the one of each index, as `SPRITE::SINGLEHUE` of JJ2+ draws it. Index 0
+		 * stays the transparent one. The row is built again whenever the sprite palette changes. Callers with the same
+		 * @p gradientStart share one row. Returns the offset, or -1 if no row is free. Release it with @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireSingleHuePaletteOffset(std::uint8_t gradientStart);
+		/**
+		 * @brief Acquires a reference-counted palette offset of the sprite palette as a gem of the given color
+		 *
+		 * Index `i` of the row is entry `i & 127` of the gradient of the gem (see @ref GetGemColor()), as `SPRITE::GEM`
+		 * of JJ2+ draws it - its translucency is up to the caller. Index 0 stays the transparent one. The row is built
+		 * again whenever the sprite palette changes. Callers with the same @p gem share one row. Returns the offset, or
+		 * -1 if no row is free. Release it with @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireGemPaletteOffset(std::uint8_t gem);
+		/**
+		 * @brief Acquires a reference-counted palette offset of a single color of the sprite palette, its opacity by the index
+		 *
+		 * Index `i` of the row is the color of index @p color of the sprite palette with the alpha of `i`, as
+		 * `SPRITE::ALPHAMAP` of JJ2+ draws it. The row is built again whenever the sprite palette changes. Callers with the
+		 * same @p color share one row. Returns the offset, or -1 if no row is free. Release it with @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireAlphaMapPaletteOffset(std::uint8_t color);
+		/**
+		 * @brief Acquires a reference-counted palette offset of a color of the sprite palette for indices below a density
+		 *
+		 * Index `i` of the row is the color of index @p color of the sprite palette if `i` is less than @p density, transparent
+		 * otherwise, so a texture of noise drawn through it shows as many pixels as `SPRITE::BLEND_DISSOLVE` of JJ2+. The row is
+		 * built again whenever the sprite palette changes. Returns the offset, or -1 if no row is free. Release it with
+		 * @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireDissolvePaletteOffset(std::uint8_t color, std::uint8_t density);
+		/**
+		 * @brief Acquires a reference-counted palette offset of the brightness of the sprite palette in color channels
+		 *
+		 * Index `i` of the row is a half of the brightness JJ2 has for index `i` of the sprite palette in the channels that
+		 * @p channels picks (0 red, 1 green, 2 blue, 3 red and blue, 4 red and green, 5 green and blue, others all three),
+		 * black in the others, so drawn additively it's `SPRITE::NEONGLOW` of JJ2+. The row is built again whenever the
+		 * sprite palette changes. Returns the offset, or -1 if no row is free. Release it with @ref ReleasePaletteOffset.
+		 */
+		std::int32_t AcquireNeonGlowPaletteOffset(std::uint8_t channels);
+		/**
+		 * @brief Returns entry @p index of the gradient of a gem as `SPRITE::GEM` of JJ2+ draws it
+		 *
+		 * Gems 0 to 3 are the red, green, blue and purple gems of the game (the gradients the gems are drawn with),
+		 * up to 12 are the other gradients JJ2+ shows for them, the others have none (returns a transparent color).
+		 * Only the lower 7 bits of @p index are used. The color is packed as `0xAABBGGRR`.
+		 */
+		std::uint32_t GetGemColor(std::uint8_t gem, std::uint8_t index) const;
+		/**
+		 * @brief Releases one reference to a palette offset from @ref AcquirePaletteOffset and the like
+		 *
+		 * Also of @ref AcquireShiftedPaletteOffset, @ref AcquireSingleHuePaletteOffset and @ref AcquireGemPaletteOffset.
 		 * The underlying palette is returned to the pool only when the last holder releases it.
 		 */
 		void ReleasePaletteOffset(std::int32_t paletteOffset);
@@ -388,9 +476,11 @@ namespace Jazz2
 		 * @param withDiffuse       If `false`, only the collision masks are loaded and the tile set has no
 		 *                          textures --- for a caller that requests it again once it knows which tiles to
 		 *                          pack (see @ref Tiles::TileMap::PruneTilesetAtlas())
+		 * @param trueColorPalette  Optional 256 colors the 8-bit tiles are drawn in as true color tiles, so they
+		 *                          don't follow the live palette (as `jjTilesFromTileset32()` of JJ2+)
 		 */
 		std::unique_ptr<Tiles::TileSet> RequestTileSet(StringView path, std::uint16_t captionTileId, bool applyPalette, const std::uint8_t* paletteRemapping = nullptr,
-			const BitArray* usedTiles = nullptr, bool withDiffuse = true);
+			const BitArray* usedTiles = nullptr, bool withDiffuse = true, const std::uint32_t* trueColorPalette = nullptr);
 		/**
 		 * @brief Loads a tile set from a stream
 		 *
@@ -398,9 +488,27 @@ namespace Jazz2
 		 * hands over the one it edits this way. The @p path is what the tile set is known as.
 		 */
 		std::unique_ptr<Tiles::TileSet> RequestTileSet(Stream& s, StringView path, std::uint16_t captionTileId, bool applyPalette,
-			const std::uint8_t* paletteRemapping = nullptr, const BitArray* usedTiles = nullptr, bool withDiffuse = true);
+			const std::uint8_t* paletteRemapping = nullptr, const BitArray* usedTiles = nullptr, bool withDiffuse = true,
+			const std::uint32_t* trueColorPalette = nullptr);
+		/** @brief Creates a tile set of transparent tiles without collision, palette-indexed if @p indexed, for images saved into them later */
+		std::unique_ptr<Tiles::TileSet> CreateBlankTileSet(std::uint16_t tileCount, bool indexed);
+		/**
+		 * @brief Opens the file of a tile set, found the same way as by @ref RequestTileSet()
+		 *
+		 * For a caller that needs what the file stores rather than a tile set made of it, see @ref Formats::TileSetFile.
+		 * Returns `nullptr` if there is no such tile set.
+		 */
+		std::unique_ptr<Stream> OpenTileSetFile(StringView path);
 		/** @brief Returns `true` if specified level exists */
 		bool LevelExists(StringView levelName);
+		/**
+		 * @brief Returns the full name of a level that a server configuration or an admin command names
+		 *
+		 * A name without an episode (`battle1`) is a level of no episode, a name ending with a slash (`prince/`) is
+		 * the first level of that episode. If there's no such episode, the name is returned as it is, so it can be
+		 * reported.
+		 */
+		String ResolveLevelName(StringView name);
 		/**
 		 * @brief Loads specified level into a level descriptor
 		 *
@@ -455,9 +563,10 @@ namespace Jazz2
 		/**
 			@brief Compiles the shaders of the special tile layers, if they aren't compiled yet
 
-			Called once a level that has an x-ray or a blur-behind layer is loaded, so a game that never plays one
-			never spends the startup time or the memory on them. Returns `false` if they couldn't be compiled,
-			the layers are then drawn as on the backends that can't show the effects.
+			Called once a level that has an x-ray, a blur-behind or a reflection layer is loaded, so a game that never
+			plays one never spends the startup time or the memory on them. Returns `false` if they couldn't be
+			compiled, the layers are then drawn as on the backends that can't show the effects. The shader of the
+			reflection layers isn't required, without it only they aren't drawn.
 		*/
 		bool CompileLayerEffectShaders();
 #endif
@@ -490,6 +599,50 @@ namespace Jazz2
 			return _palettes;
 		}
 
+		/**
+			@brief Sprite sheet of a graphics asset (`.aura`) as it's stored, see @ref ReadSpriteSheet()
+
+			The fields have the meaning of the same fields of @ref GenericGraphicResource, the frames are laid out the
+			same way. The pixels keep the channels of the file - 1 (palette index), 2 (palette index and alpha) or 4
+			(RGBA).
+		*/
+		struct SpriteSheet
+		{
+			/** @brief Size of the sheet in pixels */
+			Vector2i Size;
+			/** @brief Bytes per pixel of @ref Pixels */
+			std::int32_t ChannelCount;
+			/** @brief Whether the pixels are palette indices rather than colors */
+			bool IsIndexed;
+			/** @brief Size of the logical cell of a frame */
+			Vector2i FrameDimensions;
+			/** @brief Columns and rows of the regular grid */
+			Vector2i FrameConfiguration;
+			/** @brief Number of frames */
+			std::int32_t FrameCount;
+			/** @brief Animation duration (in normalized frames) */
+			float AnimDuration;
+			/** @brief Hotspot */
+			Vector2i Hotspot;
+			/** @brief Coldspot, @ref InvalidValue if there's none */
+			Vector2i Coldspot;
+			/** @brief Gunspot, @ref InvalidValue if there's none */
+			Vector2i Gunspot;
+			/** @brief Where each frame sits in a tightly packed sheet, empty for a regular grid */
+			SmallVector<Resources::FrameRect, 0> FrameRects;
+			/** @brief Pixels, @ref ChannelCount bytes each, rows packed continuously */
+			std::unique_ptr<std::uint8_t[]> Pixels;
+		};
+
+		/**
+			@brief Reads a sprite sheet (`.aura`, relative to `Animations`) into memory without making a texture of it
+
+			For what needs the pixels themselves, the level scripts edit the sprites this way. Without @p withPixels
+			only the header is read and @ref SpriteSheet::Pixels stays empty. Returns `false` if there's no such sprite
+			sheet or it can't be read.
+		*/
+		bool ReadSpriteSheet(StringView path, SpriteSheet& sheet, bool withPixels = true);
+
 	private:
 #ifndef DOXYGEN_GENERATING_OUTPUT
 		// Doxygen 1.12.0 outputs also private structs/unions even if it shouldn't
@@ -513,14 +666,38 @@ namespace Jazz2
 		void DetectUserContent();
 		// Returns where the user-accessible "Content" directory is or would be, empty where the platform has none
 		String GetUserContentCandidate() const;
+		// Opens the file FindContentFile() would find
+		std::unique_ptr<Stream> OpenFoundContentFile(StringView path, String& fullPath, std::int32_t bufferSize) const;
 
 		// Cache key offset for indexed graphics (palette indices kept in the texture instead of baked), distinct
 		// from any real paletteOffset so indexed and baked variants of the same sprite are cached separately
 		static constexpr std::uint16_t IndexedGraphicsCacheKey = UINT16_MAX;
 
+#ifndef DOXYGEN_GENERATING_OUTPUT
+		// Doxygen 1.12.0 outputs also private structs/unions even if it shouldn't
+		struct AuraHeader
+		{
+			std::uint8_t Flags;
+			std::uint8_t ChannelCount;
+			Vector2i FrameDimensions;
+			Vector2i FrameConfiguration;
+			std::uint16_t FrameCount;
+			std::uint16_t AnimDuration;
+			std::uint16_t Hotspot[2];
+			std::uint16_t Coldspot[2];
+			std::uint16_t Gunspot[2];
+			SmallVector<Resources::FrameRect, 0> FrameRects;
+			// Size of the image that follows the header
+			std::uint32_t Width;
+			std::uint32_t Height;
+		};
+#endif
+
 		GenericGraphicResource* RequestGraphicsAura(StringView path, std::uint16_t paletteOffset, bool keepIndexed = false);
 		// Reads just the frame size out of a sheet's header, for a deferred metadata's bounding box
 		bool ReadAuraFrameDimensions(StringView path, Vector2i& frameDimensions);
+		// Reads the header of a sheet up to its image, returns `false` if it isn't a sprite sheet
+		static bool ReadAuraHeader(Stream& s, AuraHeader& header);
 		// `contentEndsStream` states that the image is the last thing in the stream, which lets it be read into
 		// memory in one go; pass `false` when anything follows it, so the position is left right after the image.
 		// `lz4` says the content is one LZ4 block (see JJ2Anims::ImageContentLz4Flag); returns `false` if it could
@@ -537,8 +714,9 @@ namespace Jazz2
 		// (drops baked fonts, regenerates gem palettes); just skips the bytes when headless or `applyPalette` is false
 		void ReadTilesetPalette(Stream& uc, bool applyPalette);
 		// Reads the tileset's packed collision mask from the decompressed stream (kept in the cache's 1-bit-per-pixel
-		// form, see TileSet::MaskBytesPerTile); `maskSize` receives its size in bytes
-		static std::unique_ptr<std::uint8_t[]> ReadTilesetMask(Stream& uc, std::uint32_t& maskSize);
+		// form, see TileSet::MaskBytesPerTile); it always has the size of `tileCount` masks, whatever the file says,
+		// which `maskSize` receives in bytes
+		static std::unique_ptr<std::uint8_t[]> ReadTilesetMask(Stream& uc, std::uint16_t tileCount, std::uint32_t& maskSize);
 		// Builds the padded tileset diffuse atlas (R8 indexed for all-8-bit tilesets, RGBA8 baked when any tile is
 		// 32-bit), the per-tile fully-opaque flags and the optional caption thumbnail. Reads pixels from the raw stream
 		// `s` (the image content follows the compressed block). Sets `indexTiles` to the chosen mode.
@@ -547,7 +725,7 @@ namespace Jazz2
 		SmallVector<std::unique_ptr<Texture>, 1> BuildTilesetDiffuse(Stream& s, const char* name, std::uint8_t channelCount,
 			bool lz4Content, const BitArray* usedTiles, std::unique_ptr<std::uint16_t[]>& atlasSlot,
 			std::uint32_t width, std::uint32_t height, std::uint16_t tileCount, const std::uint8_t* is32bitTile,
-			const std::uint8_t* paletteRemapping, std::uint16_t captionTileId, bool& indexTiles,
+			const std::uint8_t* paletteRemapping, const std::uint32_t* trueColorPalette, std::uint16_t captionTileId, bool& indexTiles,
 			std::unique_ptr<std::uint8_t[]>& tileDiffuseOpaque, std::unique_ptr<std::uint8_t[]>& tileEffectInfo, std::unique_ptr<Color[]>& captionTile);
 		// Packs an indexed sprite/tile (palette index in the red/first channel) into the smallest texture format: R8
 		// when alpha is on/off only (4x less VRAM than RGBA8), or RG8 keeping the per-pixel alpha in green (sampled
@@ -576,6 +754,22 @@ namespace Jazz2
 		static std::int32_t GetFurSchemeIndex(PlayerType playerType);
 		// Core recolor builder, keyed by the scheme index stored on each dynamic palette row
 		void BuildPlayerColorPaletteForScheme(std::uint32_t furColor, std::int32_t schemeIndex, std::uint32_t* outPalette) const;
+		// Builds the sprite palette shifted by the given number of entries, see AcquireShiftedPaletteOffset()
+		void BuildShiftedPalette(std::uint8_t shift, std::uint32_t* outPalette) const;
+		// Builds the sprite palette in the gradient of the given start, see AcquireSingleHuePaletteOffset()
+		void BuildSingleHuePalette(std::uint8_t gradientStart, std::uint32_t* outPalette) const;
+		// Builds the sprite palette as a gem of the given color, see AcquireGemPaletteOffset()
+		void BuildGemPalette(std::uint8_t gem, std::uint32_t* outPalette) const;
+		// Builds a single color of the sprite palette with the alpha of each index, see AcquireAlphaMapPaletteOffset()
+		void BuildAlphaMapPalette(std::uint8_t color, std::uint32_t* outPalette) const;
+		// Builds a color of the sprite palette for the indices below a density, see AcquireDissolvePaletteOffset()
+		void BuildDissolvePalette(std::uint32_t value, std::uint32_t* outPalette) const;
+		// Builds the brightness of the sprite palette in color channels, see AcquireNeonGlowPaletteOffset()
+		void BuildNeonGlowPalette(std::uint8_t channels, std::uint32_t* outPalette) const;
+		// Builds the gradient of 128 entries a gem is drawn with from its 5 stops in the sprite palette, 32 entries each
+		void BuildGemGradient(const std::uint8_t* stops, std::uint32_t* outGradient) const;
+		// Returns a dynamic palette row derived from the sprite palette by a scheme of its own and a value, see AcquireShiftedPaletteOffset()
+		std::int32_t AcquireDerivedPaletteOffset(std::uint8_t scheme, std::uint32_t value);
 #if defined(DEATH_DEBUG)
 		void MigrateGraphics(StringView path);
 #endif
@@ -588,6 +782,8 @@ namespace Jazz2
 		// the dirty range below and re-uploaded lazily. Dynamically allocated per-player rows are reference-counted
 		// (_paletteRowRefCount > 0 = in use) and keyed by both fur color (_paletteRowColor) and recolor scheme
 		// (_paletteRowScheme) so identical recolors share a row (a character's scheme decides which blocks it recolors).
+		// A row of the shifted sprite palette has ShiftedPaletteScheme as its scheme and the shift as its color, a row of
+		// the sprite palette in a single hue SingleHuePaletteScheme and the start of the gradient.
 		std::unique_ptr<Texture> _paletteTexture;
 		std::int32_t _paletteDirtyFirstRow;
 		std::int32_t _paletteDirtyLastRow;
@@ -605,6 +801,9 @@ namespace Jazz2
 #if defined(WITH_AUDIO)
 		HashMap<String, std::unique_ptr<GenericSoundResource>> _cachedSounds;
 #endif
+		// How many times each metadata is pinned, see PinMetadata(), and how many retains are held, see RetainLoadedResources()
+		SmallVector<Pair<Metadata*, std::int32_t>, 0> _pinnedMetadata;
+		std::int32_t _retainedResources = 0;
 		std::unique_ptr<UI::Font> _fonts[(std::int32_t)FontType::Count];
 		std::unique_ptr<Shader> _precompiledShaders[(std::int32_t)PrecompiledShader::Count];
 		SmallVector<std::unique_ptr<PakFile>> _mountedPaks;

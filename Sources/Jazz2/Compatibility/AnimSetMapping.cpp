@@ -1,5 +1,7 @@
 ﻿#include "AnimSetMapping.h"
 
+#include <Containers/StringConcatenable.h>
+
 namespace Jazz2::Compatibility
 {
 	AnimSetMapping::AnimSetMapping(JJ2Version version)
@@ -833,8 +835,8 @@ namespace Jazz2::Compatibility
 			m.Add("Pickup"_s, "fast_feet"_s);
 			m.Add("Object"_s, "gem_giant"_s, JJ2DefaultPalette::Sprite, false, true);
 
-			//m.Add("Pickup"_s, "gem2"_s, keepIndexed: true);
-			m.DiscardItems(1);
+			// The gems of the level show this one in the original, the one before is of the HUD
+			m.DiscardItemAs("Pickup"_s, "gem"_s);
 
 			m.Add("Pickup"_s, "airboard"_s);
 			m.Add("Pickup"_s, "coin_gold"_s);
@@ -1964,18 +1966,34 @@ namespace Jazz2::Compatibility
 				entry.Category = Discard;
 
 				std::int32_t key = (_currentSet << 16) | _currentItem;
-				_entries.emplace(key, std::move(entry));
+				_entries.emplace(key, Death::move(entry));
 
 				_currentItem++;
 				_currentOrdinal++;
 			}
+			UpdateItemCount();
 		}
+	}
+
+	void AnimSetMapping::DiscardItemAs(StringView category, StringView name)
+	{
+		Entry entry;
+		entry.Category = Discard;
+		entry.Name = category + '/' + name;
+
+		std::int32_t key = (_currentSet << 16) | _currentItem;
+		_entries.emplace(key, Death::move(entry));
+
+		_currentItem++;
+		_currentOrdinal++;
+		UpdateItemCount();
 	}
 
 	void AnimSetMapping::SkipItems(std::uint32_t advanceBy)
 	{
 		_currentItem += advanceBy;
 		_currentOrdinal += advanceBy;
+		UpdateItemCount();
 	}
 
 	void AnimSetMapping::NextSet(std::uint32_t advanceBy, JJ2Version appliesTo)
@@ -1998,10 +2016,11 @@ namespace Jazz2::Compatibility
 			entry.AllowRealtimePalette = allowRealtimePalette;
 
 			std::uint32_t key = (_currentSet << 16) | _currentItem;
-			_entries.emplace(key, std::move(entry));
+			_entries.emplace(key, Death::move(entry));
 
 			_currentItem++;
 			_currentOrdinal++;
+			UpdateItemCount();
 		}
 	}
 
@@ -2016,10 +2035,27 @@ namespace Jazz2::Compatibility
 		entry.AllowRealtimePalette = allowRealtimePalette;
 
 		std::uint32_t key = (_currentSet << 16) | _currentItem;
-		_entries.emplace(key, std::move(entry));
+		_entries.emplace(key, Death::move(entry));
 
 		_currentItem++;
 		_currentOrdinal++;
+		UpdateItemCount();
+	}
+
+	void AnimSetMapping::UpdateItemCount()
+	{
+		auto it = _itemCounts.find(_currentSet);
+		if (it == _itemCounts.end()) {
+			_itemCounts.emplace(_currentSet, _currentItem);
+		} else if (it->second < _currentItem) {
+			it->second = _currentItem;
+		}
+	}
+
+	std::uint32_t AnimSetMapping::GetItemCount(std::uint32_t set) const
+	{
+		auto it = _itemCounts.find(set);
+		return (it != _itemCounts.end() ? it->second : 0);
 	}
 
 	AnimSetMapping::Entry* AnimSetMapping::Get(std::uint32_t set, std::uint32_t item)

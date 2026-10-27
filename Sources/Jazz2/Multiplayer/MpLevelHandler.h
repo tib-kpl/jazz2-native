@@ -171,12 +171,13 @@ namespace Jazz2::Multiplayer
 		void RollbackToCheckpoint(Actors::Player* player) override;
 		void HandleActivateSugarRush(Actors::Player* player) override;
 		void HandleCreateParticleDebrisOnPerish(const Actors::ActorBase* self, Actors::ParticleDebrisEffect effect, Vector2f speed) override;
-		void HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count) override;
+		void HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count, float elasticity) override;
 		void ShowLevelText(StringView text, Actors::ActorBase* initiator = nullptr) override;
 		StringView GetLevelText(std::uint32_t textId, std::int32_t index = -1, std::uint32_t delimiter = 0) override;
 		void OverrideLevelText(std::uint32_t textId, StringView value) override;
 		void LimitCameraView(Actors::Player* player, Vector2f playerPos, std::int32_t left, std::int32_t width) override;
-		void OverrideCameraView(Actors::Player* player, float x, float y, bool topLeft = false) override;
+		void OverrideCameraView(Actors::Player* player, CameraOverride modeX, float x, CameraOverride modeY, float y,
+			bool centered = false, bool instant = true) override;
 		void ShakeCameraView(Actors::Player* player, float duration) override;
 		void ShakeCameraViewNear(Vector2f pos, float duration) override;
 		void SetTrigger(std::uint8_t triggerId, bool newState) override;
@@ -190,9 +191,6 @@ namespace Jazz2::Multiplayer
 		void PlayerExecuteRumble(Actors::Player* player, StringView rumbleEffect) override;
 
 		bool SerializeResumableToStream(Stream& dest) override;
-#if defined(WITH_EDITOR)
-		bool CanOpenInEditor() const override;
-#endif
 
 		void OnAdvanceDestructibleTileAnimation(std::int32_t tx, std::int32_t ty, std::int32_t amount) override;
 
@@ -486,7 +484,7 @@ namespace Jazz2::Multiplayer
 			SfxFlags Flags;
 
 			PendingSfx(Actors::ActorBase* actor, String identifier, std::uint16_t gain, std::uint16_t pitch, SfxFlags flags)
-				: Actor(actor), Identifier(std::move(identifier)), Gain(gain), Pitch(pitch), Flags(flags) {}
+				: Actor(actor), Identifier(Death::move(identifier)), Gain(gain), Pitch(pitch), Flags(flags) {}
 		};
 
 #if defined(WITH_AUDIO)
@@ -534,6 +532,9 @@ namespace Jazz2::Multiplayer
 		static constexpr float CtfTouchRadius = 40.0f;	// Pixel radius for picking up / returning / capturing flags
 		// A connected peer that doesn't authenticate in this time is kicked - a genuine client does it right away
 		static constexpr std::int32_t AuthTimeoutSecs = 20;
+		// Set in the flags of PlayerPropertyType::OverrideCameraView when they carry the modes of the axes and whether it's
+		// instant, a server of 3.9.0 sent only whether the position is the top left corner of the view
+		static constexpr std::uint8_t OverrideCameraViewModes = 0x40;
 
 		// Anti-cheat escalation, see AntiCheatState - a violation adds 0.5-4 points to the suspicion, which decays by
 		// AntiCheatDecayPerSec, so an honest player's occasional desync never comes close to the thresholds

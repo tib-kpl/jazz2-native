@@ -27,13 +27,6 @@ out vec2 vTexCoords;
 out float vAlpha;
 out highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
 
@@ -48,16 +41,11 @@ layout (std140) uniform InstanceBlock
 
 
 
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
-
 void main()
 {
 	gl_Position = uProjectionMatrix * uViewMatrix * modelMatrix * vec4(aPosition.x, aPosition.y, 0.0, 1.0);
 	vTexCoords = aTexCoords;
 	vAlpha = aColor.a;
-	// Sprites of different palettes share a draw, so the palette offset rides in the vertex color
 	vPaletteOffset = aColor.r;
 }
 )__SHDR__";
@@ -75,13 +63,6 @@ varying vec2 vTexCoords;
 varying float vAlpha;
 varying highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
 
@@ -93,16 +74,11 @@ uniform mat4 uViewMatrix;
 
 
 
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
-
 void main()
 {
 	gl_Position = uProjectionMatrix * uViewMatrix * modelMatrix * vec4(aPosition.x, aPosition.y, 0.0, 1.0);
 	vTexCoords = aTexCoords;
 	vAlpha = aColor.a;
-	// Sprites of different palettes share a draw, so the palette offset rides in the vertex color
 	vPaletteOffset = aColor.r;
 }
 )__SHDR__";
@@ -124,31 +100,13 @@ in vec2 vTexCoords;
 in float vAlpha;
 in highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
 out vec4 COLOR;
 
 void main() {
 	vec4 src = texture(uTexture, vTexCoords);
-#ifdef USE_PALETTE
-	// An indexed texel is transparent where its palette entry is, which the index alone doesn't tell
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	float alpha = texture(uTexturePalette, vec2(palX, palY)).a * src.a;
-#else
 	float alpha = src.a;
-#endif
 	COLOR = vec4(alpha * vAlpha);
 }
 
@@ -169,31 +127,13 @@ varying vec2 vTexCoords;
 varying float vAlpha;
 varying highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
 
 void main() {
 	vec4 COLOR;
 	vec4 src = texture2D(uTexture, vTexCoords);
-#ifdef USE_PALETTE
-	// An indexed texel is transparent where its palette entry is, which the index alone doesn't tell
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	float alpha = texture2D(uTexturePalette, vec2(palX, palY)).a * src.a;
-#else
 	float alpha = src.a;
-#endif
 	COLOR = vec4(alpha * vAlpha);
 	gl_FragColor = COLOR;
 }
@@ -230,8 +170,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char Silhouette_USE_PALETTE_Vs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 in vec2 aPosition;
 in vec2 aTexCoords;
@@ -240,13 +179,6 @@ in vec4 aColor;
 out vec2 vTexCoords;
 out float vAlpha;
 out highp float vPaletteOffset;
-
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
 
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
@@ -262,16 +194,13 @@ layout (std140) uniform InstanceBlock
 
 
 
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
 void main()
 {
 	gl_Position = uProjectionMatrix * uViewMatrix * modelMatrix * vec4(aPosition.x, aPosition.y, 0.0, 1.0);
 	vTexCoords = aTexCoords;
 	vAlpha = aColor.a;
-	// Sprites of different palettes share a draw, so the palette offset rides in the vertex color
 	vPaletteOffset = aColor.r;
 }
 )__SHDR__";
@@ -279,8 +208,7 @@ void main()
 
 #if defined(WITH_RHI_GL) && defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char Silhouette_USE_PALETTE_Vs100[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 attribute vec2 aPosition;
 attribute vec2 aTexCoords;
@@ -289,13 +217,6 @@ attribute vec4 aColor;
 varying vec2 vTexCoords;
 varying float vAlpha;
 varying highp float vPaletteOffset;
-
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
 
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
@@ -308,16 +229,13 @@ uniform mat4 uViewMatrix;
 
 
 
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
 void main()
 {
 	gl_Position = uProjectionMatrix * uViewMatrix * modelMatrix * vec4(aPosition.x, aPosition.y, 0.0, 1.0);
 	vTexCoords = aTexCoords;
 	vAlpha = aColor.a;
-	// Sprites of different palettes share a draw, so the palette offset rides in the vertex color
 	vPaletteOffset = aColor.r;
 }
 )__SHDR__";
@@ -325,8 +243,7 @@ void main()
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char Silhouette_USE_PALETTE_Fs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 #ifdef GL_ES
 #ifdef GL_FRAGMENT_PRECISION_HIGH
@@ -340,31 +257,17 @@ in vec2 vTexCoords;
 in float vAlpha;
 in highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
 out vec4 COLOR;
 
 void main() {
 	vec4 src = texture(uTexture, vTexCoords);
-#ifdef USE_PALETTE
-	// An indexed texel is transparent where its palette entry is, which the index alone doesn't tell
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	float alpha = texture(uTexturePalette, vec2(palX, palY)).a * src.a;
-#else
-	float alpha = src.a;
-#endif
 	COLOR = vec4(alpha * vAlpha);
 }
 
@@ -373,8 +276,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char Silhouette_USE_PALETTE_Fs100[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -386,31 +288,17 @@ varying vec2 vTexCoords;
 varying float vAlpha;
 varying highp float vPaletteOffset;
 
-// Every global reaches both stages, InstanceBlock included, and a named uniform block whose members
-// disagree on precision between them does not link - so the fragment prologue keeps the vertex default
-
-// The coverage of the actors behind an x-ray tile layer (see Rendering::XRayMaskRenderer): every sprite
-// arrives as one quad of a mesh in the 8-float layout of the tile-layer meshes, already in world space, and
-// only its alpha is written - premultiplied white, so overlapping sprites add up to their union.
-
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
 
 void main() {
 	vec4 COLOR;
 	vec4 src = texture2D(uTexture, vTexCoords);
-#ifdef USE_PALETTE
-	// An indexed texel is transparent where its palette entry is, which the index alone doesn't tell
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	float alpha = texture2D(uTexturePalette, vec2(palX, palY)).a * src.a;
-#else
-	float alpha = src.a;
-#endif
 	COLOR = vec4(alpha * vAlpha);
 	gl_FragColor = COLOR;
 }

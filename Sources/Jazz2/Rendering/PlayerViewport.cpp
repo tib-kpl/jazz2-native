@@ -19,7 +19,7 @@ namespace Jazz2::Rendering
 			_behindCopyPass(this), _behindDownsamplePass(this), _behindBlurPass1(this), _behindBlurPass2(this),
 #endif
 			_cameraViewCenterY(0.0f), _lookAheadDirectionX(1.0f), _lookAheadTurnTime(0.0f), _centerOnTargetProgress(0.0f),
-			_shakeDuration(0.0f), _cameraScale(1.0f), _freeCamera(false)
+			_shakeDuration(0.0f), _cameraEaseProgress(1.0f), _cameraScale(1.0f), _freeCamera(false), _cameraFixedX(false), _cameraFixedY(false)
 	{
 		_ambientLight = levelHandler->_defaultAmbientLight;
 		_ambientLightTarget = _ambientLight.W;
@@ -176,11 +176,15 @@ namespace Jazz2::Rendering
 		// The passes that blur what is behind the blur layers are drawn by the scene view itself, in the middle of its
 		// queue, so they are only in the chain to be visited and committed with the rest
 		_view->RemoveSplitPasses();
+		_layerEffects.CopyPasses = 0;
+		_layerEffects.BlurPasses = 0;
 		if (_layerEffects.BehindBlur != nullptr || _layerEffects.BehindCopy != nullptr) {
 			for (BlurRenderPass* pass : { &_behindCopyPass, &_behindDownsamplePass, &_behindBlurPass1, &_behindBlurPass2 }) {
 				if (pass->GetView() != nullptr) {
 					pass->Register();
-					_view->AddSplitPass(pass->GetView());
+					std::uint32_t bit = _view->AddSplitPass(pass->GetView());
+					// A layer asks only for the passes of what it samples
+					(pass == &_behindCopyPass ? _layerEffects.CopyPasses : _layerEffects.BlurPasses) |= bit;
 				}
 			}
 		}
@@ -205,7 +209,8 @@ namespace Jazz2::Rendering
 
 	Rectf PlayerViewport::GetBounds() const
 	{
-		return _combineRenderer->GetBounds();
+		// Scripts ask already while the level is loaded, before the viewport is initialized
+		return (_combineRenderer != nullptr ? _combineRenderer->GetBounds() : Rectf());
 	}
 
 	Vector2i PlayerViewport::GetViewportSize() const
@@ -236,9 +241,11 @@ namespace Jazz2::Rendering
 		bool needsMask = (tileMap != nullptr && tileMap->HasXRayLayers());
 		const bool hasBlurLayers = (tileMap != nullptr && tileMap->HasBlurBehindLayers());
 		// Blurring what is behind a layer follows the blur effects option, a reflection or displacement of it is always
-		// shown - a blur layer with neither isn't drawn at all
+		// shown - a blur layer with neither isn't drawn at all. A reflection layer mirrors the same sharp copy, and a chroma
+		// key layer compares its colors with the key.
 		bool needsBehindBlur = (hasBlurLayers && PreferencesCache::BlurEffects);
-		bool needsBehindCopy = (hasBlurLayers && tileMap->BlurBehindLayersNeedSharpCopy());
+		bool needsBehindCopy = ((hasBlurLayers && tileMap->BlurBehindLayersNeedSharpCopy()) ||
+			(tileMap != nullptr && (tileMap->HasReflectionLayers() || tileMap->HasChromaKeyLayers())));
 		if ((needsMask || needsBehindBlur || needsBehindCopy) && !ContentResolver::Get().CompileLayerEffectShaders()) {
 			LOGW("Shaders of the special tile layers are not available, the layers are drawn without their effects");
 			needsMask = false;
@@ -378,23 +385,6 @@ namespace Jazz2::Rendering
 		Vector2i halfView = GetViewportSize() / 2;
 		Vector2f focusPos = _targetActor->GetPos();
 
-		bool overridePosX = false, overridePosY = false;
-		// TODO: Not working correctly on some platforms
-		/*if (!std::isinf(_cameraOverridePos.X)) {
-			overridePosX = true;
-			focusPos.X = _cameraOverridePos.X;
-			if (focusPos.X <= 0.0f) {
-				focusPos.X = halfView.X - focusPos.X;
-			}
-		}
-		if (!std::isinf(_cameraOverridePos.Y)) {
-			overridePosY = true;
-			focusPos.Y = _cameraOverridePos.Y;
-			if (focusPos.Y <= 0.0f) {
-				focusPos.Y = halfView.Y - 1.0f - focusPos.Y;
-			}
-		}*/
-
 		// Smooth, cumulative look-ahead. The camera base is locked to the player (see the clamp below), so the camera
 		// never lags behind - this is purely a lead in the direction of travel. The lead eases toward a target that is
 		// proportional to how much the player's speed exceeds CameraStickSpeed (so it builds up and decays gradually),
@@ -403,10 +393,10 @@ namespace Jazz2::Rendering
 		Vector2f focusSpeed = _targetActor->GetSpeed();
 		Vector2f actualMovement = focusPos - _cameraLastPos;
 		_cameraLastPos = focusPos;
-		if (overridePosX || std::abs(actualMovement.X) < 0.01f) {
+		if (std::abs(actualMovement.X) < 0.01f) {
 			focusSpeed.X = 0.0f;
 		}
-		if (overridePosY || std::abs(actualMovement.Y) < 0.01f) {
+		if (std::abs(actualMovement.Y) < 0.01f) {
 			focusSpeed.Y = 0.0f;
 		}
 
@@ -544,9 +534,7 @@ namespace Jazz2::Rendering
 		float viewCenterY = lerp(_cameraViewCenterY, focusPos.Y, centerOnTarget);
 		const auto alignView = [](float pos) { return (PreferencesCache::UnalignedViewport ? pos : floorFast(pos)); };
 		_centerOnTargetOffset = Vector2f::Zero;
-		if (overridePosX) {
-			_cameraPos.X = focusPos.X + _shakeOffset.X;
-		} else if (_viewBounds.W > halfView.X * 2) {
+		if (_viewBounds.W > halfView.X * 2) {
 			const float minX = _viewBounds.X + halfView.X, maxX = _viewBounds.X + _viewBounds.W - halfView.X;
 			const float cameraX = std::clamp(focusPos.X + roundFast(lookAhead.X), minX, maxX);
 			_cameraPos.X = alignView(cameraX + _shakeOffset.X);
@@ -554,11 +542,11 @@ namespace Jazz2::Rendering
 		} else {
 			_cameraPos.X = floorFast(_viewBounds.X + _viewBounds.W * 0.5f + _shakeOffset.X);
 		}
-		if (overridePosY) {
-			_cameraPos.Y = focusPos.Y + _shakeOffset.Y;
-		} else if (_viewBounds.H > halfView.Y * 2) {
+		if (_viewBounds.H > halfView.Y * 2) {
 			const float minY = _viewBounds.Y + halfView.Y - 1.0f, maxY = _viewBounds.Y + _viewBounds.H - halfView.Y - 2.0f;
-			const float cameraY = std::clamp(viewCenterY + roundFast(lookAhead.Y), minY, maxY);
+			// The vertical anchor is off the player by whole pixels too - floored on its own while it eases back onto the
+			// player, it stepped in other frames than the player did, which shook by a pixel on a moving platform
+			const float cameraY = std::clamp(focusPos.Y + roundFast(viewCenterY - focusPos.Y + lookAhead.Y), minY, maxY);
 			_cameraPos.Y = alignView(cameraY + _shakeOffset.Y);
 			_centerOnTargetOffset.Y = alignView(std::clamp(focusPos.Y, minY, maxY)) - alignView(cameraY);
 		} else {
@@ -567,6 +555,24 @@ namespace Jazz2::Rendering
 		if (!PreferencesCache::EnableReforgedCamera) {
 			// The original's camera doesn't move onto the player for the wheel, so the wheel stays in the middle
 			_centerOnTargetOffset = Vector2f::Zero;
+		}
+
+		// A script may fix the camera on an axis (cameraFreeze() of JJ2+), not kept in the level there, and the view doesn't
+		// move onto the player for the wheel either. It's followed underneath all the same, so letting go of the camera
+		// eases back to where it would be by then.
+		if (_cameraFixedX) {
+			_cameraPos.X = alignView(_cameraFixedPos.X + _shakeOffset.X);
+			_centerOnTargetOffset.X = 0.0f;
+		}
+		if (_cameraFixedY) {
+			_cameraPos.Y = alignView(_cameraFixedPos.Y + _shakeOffset.Y);
+			_centerOnTargetOffset.Y = 0.0f;
+		}
+		// Getting there, or back onto the player, eased in and out, unless it was instant
+		if (_cameraEaseProgress < 1.0f) {
+			_cameraEaseProgress = std::min(_cameraEaseProgress + timeMult / CameraFixEaseDuration, 1.0f);
+			float t = _cameraEaseProgress * _cameraEaseProgress * (3.0f - 2.0f * _cameraEaseProgress);
+			_cameraPos = Vector2f(alignView(lerp(_cameraEaseFrom.X, _cameraPos.X, t)), alignView(lerp(_cameraEaseFrom.Y, _cameraPos.Y, t)));
 		}
 
 		_camera->SetView(_cameraPos - halfView.As<float>(), 0.0f, 1.0f);
@@ -579,17 +585,27 @@ namespace Jazz2::Rendering
 		}
 	}
 
-	void PlayerViewport::OverrideCamera(float x, float y, bool topLeft)
+	void PlayerViewport::OverrideCamera(CameraOverride modeX, float x, CameraOverride modeY, float y, bool centered, bool instant)
 	{
-		// TODO: Not working correctly on some platforms
-		/*if (topLeft) {
-			// Use negative values for top-left alignment
-			_cameraOverridePos.X = -x;
-			_cameraOverridePos.Y = -y;
-		} else {
-			_cameraOverridePos.X = x;
-			_cameraOverridePos.Y = y;
-		}*/
+		// Kept as the center of the view. Fixed where it already is, it isn't moved again, which a script that fixes it each
+		// frame relies on to get there; anything else eases from where the camera is now, so both axes can share the easing.
+		Vector2i halfView = GetViewportSize() / 2;
+		Vector2f center = (centered ? Vector2f(x, y) : Vector2f(x + float(halfView.X), y + float(halfView.Y)));
+		bool changed = false;
+		if (modeX != CameraOverride::Keep && !(modeX == CameraOverride::Fix && _cameraFixedX && _cameraFixedPos.X == center.X)) {
+			_cameraFixedX = (modeX == CameraOverride::Fix);
+			_cameraFixedPos.X = center.X;
+			changed = true;
+		}
+		if (modeY != CameraOverride::Keep && !(modeY == CameraOverride::Fix && _cameraFixedY && _cameraFixedPos.Y == center.Y)) {
+			_cameraFixedY = (modeY == CameraOverride::Fix);
+			_cameraFixedPos.Y = center.Y;
+			changed = true;
+		}
+		if (changed) {
+			_cameraEaseFrom = _cameraPos;
+			_cameraEaseProgress = (instant ? 1.0f : 0.0f);
+		}
 	}
 
 	void PlayerViewport::WarpCameraToTarget(bool fast)
@@ -604,6 +620,8 @@ namespace Jazz2::Rendering
 		_cameraPos = focusPos;
 		_cameraLastPos = focusPos;
 		_cameraViewCenterY = focusPos.Y;
+		// Nothing to ease from, a fixed camera is put where it's fixed by the next update
+		_cameraEaseProgress = 1.0f;
 		if (!fast) {
 			ResetLookAhead();
 		}

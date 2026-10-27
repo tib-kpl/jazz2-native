@@ -63,15 +63,36 @@ namespace Jazz2::Actors
 	}
 
 	ActorBase::ActorBase()
-		: _state(ActorState::None), _levelHandler(nullptr), _internalForceY(0.0f), _elasticity(0.0f), _friction(1.5f),
-			_unstuckCooldown(0.0f), _frozenTimeLeft(0.0f), _maxHealth(1), _health(1), _spawnFrames(0.0f), _spawnPos(0, 0, 0), _spawnEventType(EventType::Empty), _spawnEventParams{}, _metadata(nullptr),
-			_renderer(this), _currentAnimation(nullptr), _currentTransition(nullptr), _currentTransitionCancellable(false),
-			_collisionProxyID(Collisions::NullNode)
+		: _levelHandler(nullptr), _metadata(nullptr), _currentAnimation(nullptr), _currentTransition(nullptr),
+			_internalForceY(0.0f), _elasticity(0.0f), _friction(1.5f), _unstuckCooldown(0.0f), _frozenTimeLeft(0.0f), _maxHealth(1), _health(1),
+			_spawnFrames(0.0f), _spawnPos(0, 0, 0), _spawnEventParams{}, _spawnEventType(EventType::Empty), _currentTransitionCancellable(false),
+			_renderer(this), _collisionProxyID(Collisions::NullNode), _state(ActorState::None)
 	{
 	}
 
 	ActorBase::~ActorBase()
 	{
+	}
+
+#if defined(WITH_ANGELSCRIPT)
+	void ActorBase::SetUpdateOverride(std::unique_ptr<IActorUpdateOverride> value)
+	{
+		_updateOverride = Death::move(value);
+	}
+#endif
+
+	void ActorBase::EmitLights(SmallVectorImpl<LightEmitter>& lights)
+	{
+#if defined(WITH_ANGELSCRIPT)
+		if DEATH_UNLIKELY(_updateOverride != nullptr) {
+			if (!_updateOverride->OwnsLights()) {
+				OnEmitLights(lights);
+			}
+			_updateOverride->OnEmitLights(this, lights);
+			return;
+		}
+#endif
+		OnEmitLights(lights);
 	}
 
 	bool ActorBase::IsFacingLeft() const
@@ -384,7 +405,7 @@ namespace Jazz2::Actors
 
 		float effectiveSpeedX, effectiveSpeedY;
 		if (_frozenTimeLeft > 0.0f) {
-			effectiveSpeedX = std::clamp(_externalForce.X * timeMult, -16.0f, 16.0f);
+			effectiveSpeedX = std::clamp(GetFrozenMomentumX() + _externalForce.X * timeMult, -16.0f, 16.0f);
 			effectiveSpeedY = ((_state & ActorState::ApplyGravitation) == ActorState::ApplyGravitation
 				? (_speed.Y + 0.5f * accelY)
 				: std::clamp(((currentGravity * 2.0f) + _internalForceY) * timeMult, -16.0f, 16.0f));
@@ -785,6 +806,13 @@ namespace Jazz2::Actors
 
 	void ActorBase::UpdateHitbox(std::int32_t w, std::int32_t h)
 	{
+#if defined(WITH_ANGELSCRIPT)
+		// An object a level script drives can be as big as a frame of the script instead
+		if DEATH_UNLIKELY(_updateOverride != nullptr && _updateOverride->OnUpdateHitbox(this)) {
+			return;
+		}
+#endif
+
 		if (_currentAnimation == nullptr) {
 			return;
 		}
@@ -850,6 +878,11 @@ namespace Jazz2::Actors
 
 	void ActorBase::CreateParticleDebrisOnPerish(ParticleDebrisEffect effect, Vector2f speed)
 	{
+#if defined(WITH_ANGELSCRIPT)
+		if DEATH_UNLIKELY(_updateOverride != nullptr && _updateOverride->OwnsDebris()) {
+			return;
+		}
+#endif
 		_levelHandler->HandleCreateParticleDebrisOnPerish(this, effect, speed);
 
 		auto tilemap = _levelHandler->TileMap();
@@ -1059,7 +1092,8 @@ namespace Jazz2::Actors
 
 		if (effect == ParticleDebrisEffect::Frozen) {
 			for (std::int32_t i = 0; i < 20; i++) {
-				Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 10), Explosion::Type::IceShrapnel);
+				Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 10), Explosion::Type::IceShrapnel,
+					1.0f, Vector2f(GetFrozenMomentumX(), _speed.Y));
 			}
 
 			_levelHandler->PlayCommonSfx("IceBreak"_s, Vector3f(_pos.X, _pos.Y, 0.0f));
@@ -1071,15 +1105,20 @@ namespace Jazz2::Actors
 		tilemap->CreateParticleDebris(res, Vector3f(_pos.X, _pos.Y, (float)_renderer.layer()), force, _renderer.CurrentFrame, IsFacingLeft());
 	}
 
-	void ActorBase::CreateSpriteDebris(AnimState state, std::int32_t count)
+	void ActorBase::CreateSpriteDebris(AnimState state, std::int32_t count, float elasticity)
 	{
-		_levelHandler->HandleCreateSpriteDebris(this, state, count);
+#if defined(WITH_ANGELSCRIPT)
+		if DEATH_UNLIKELY(_updateOverride != nullptr && _updateOverride->OwnsDebris()) {
+			return;
+		}
+#endif
+		_levelHandler->HandleCreateSpriteDebris(this, state, count, elasticity);
 
 		auto* tilemap = _levelHandler->TileMap();
 		if (tilemap != nullptr && _metadata != nullptr) {
 			auto* res = _metadata->FindAnimation(state);
 			if (res != nullptr) {
-				tilemap->CreateSpriteDebris(res, Vector3f(_pos.X, _pos.Y, (float)_renderer.layer()), count);
+				tilemap->CreateSpriteDebris(res, Vector3f(_pos.X, _pos.Y, (float)_renderer.layer()), count, elasticity);
 			}
 		}
 	}
@@ -1130,7 +1169,7 @@ namespace Jazz2::Actors
 				_currentTransition = nullptr;
 
 				if (_currentTransitionCallback) {
-					auto oldCallback = std::move(_currentTransitionCallback);
+					auto oldCallback = Death::move(_currentTransitionCallback);
 					_currentTransitionCallback = nullptr;
 					oldCallback();
 				}
@@ -1157,14 +1196,14 @@ namespace Jazz2::Actors
 		}
 
 		if (_currentTransitionCallback) {
-			auto oldCallback = std::move(_currentTransitionCallback);
+			auto oldCallback = Death::move(_currentTransitionCallback);
 			_currentTransitionCallback = nullptr;
 			oldCallback();
 		}
 
 		_currentTransition = anim;
 		_currentTransitionCancellable = cancellable;
-		_currentTransitionCallback = std::move(callback);		
+		_currentTransitionCallback = Death::move(callback);		
 		RefreshAnimation();
 
 		return true;
@@ -1174,7 +1213,7 @@ namespace Jazz2::Actors
 	{
 		if (_currentTransition != nullptr && _currentTransitionCancellable) {
 			if (_currentTransitionCallback) {
-				auto oldCallback = std::move(_currentTransitionCallback);
+				auto oldCallback = Death::move(_currentTransitionCallback);
 				_currentTransitionCallback = nullptr;
 				oldCallback();
 			}
@@ -1207,7 +1246,7 @@ namespace Jazz2::Actors
 			RefreshAnimation();
 
 			if (_currentTransitionCallback) {
-				auto oldCallback = std::move(_currentTransitionCallback);
+				auto oldCallback = Death::move(_currentTransitionCallback);
 				_currentTransitionCallback = nullptr;
 				oldCallback();
 			}
@@ -1859,35 +1898,68 @@ namespace Jazz2::Actors
 	}
 #endif
 
-	void ActorBase::UpdateFrozenState(float timeMult)
+	bool ActorBase::IsFrozen() const
+	{
+		return (_frozenTimeLeft > 0.0f);
+	}
+
+	float ActorBase::GetFrozenMomentumX() const
+	{
+		return (GetState(ActorState::KeepsMomentumWhenFrozen) ? _speed.X : 0.0f);
+	}
+
+	void ActorBase::ThawOnNextUpdate()
 	{
 		if (_frozenTimeLeft > 0.0f) {
-			_frozenTimeLeft -= timeMult;
-			if (_frozenTimeLeft > 0.0f) {
-				// Cannot be directly in `ActorBase::HandleFrozenStateChange()` due to bug in `BaseSprite::updateRenderCommand()`,
-				// it would be called before `BaseSprite::updateRenderCommand()` but after `SceneNode::transform()`
-				_renderer.Initialize(ActorRendererType::FrozenMask);
-			} else {
-				_renderer.AnimPaused = false;
-				_renderer.Initialize(ActorRendererType::Default);
-
-				float scale = GetIceShrapnelScale();
-				for (std::int32_t i = 0; i < 10; i++) {
-					Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 10), Explosion::Type::IceShrapnel, scale);
-				}
-
-				Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 90), Explosion::Type::SmokeWhite, scale);
-
-				_levelHandler->PlayCommonSfx("IceBreak"_s, Vector3f(_pos.X, _pos.Y, 0.0f));
-			}
+			_frozenTimeLeft = 0.0f;
+			_thawPending = true;
 		}
+	}
+
+	bool ActorBase::UpdateFrozenState(float timeMult)
+	{
+		constexpr float FrozenSpeedKeptPerTick = 31.0f / 32.0f;
+
+		if (_frozenTimeLeft <= 0.0f) {
+			if (!_thawPending) {
+				return false;
+			}
+		} else {
+			_frozenTimeLeft -= timeMult;
+		}
+		if (_frozenTimeLeft > 0.0f) {
+			// Cannot be directly in `ActorBase::HandleFrozenStateChange()` due to bug in `BaseSprite::updateRenderCommand()`,
+			// it would be called before `BaseSprite::updateRenderCommand()` but after `SceneNode::transform()`
+			_renderer.Initialize(ActorRendererType::FrozenMask);
+			if (GetState(ActorState::KeepsMomentumWhenFrozen)) {
+				_speed.X *= std::pow(FrozenSpeedKeptPerTick, timeMult * Player::LegacyFrameRateScale);
+			}
+			return false;
+		}
+
+		_frozenTimeLeft = 0.0f;
+		_thawPending = false;
+		_renderer.AnimPaused = false;
+		_renderer.Initialize(ActorRendererType::Default);
+
+		// The ice flies apart as fast as the object slid in it
+		float scale = GetIceShrapnelScale();
+		for (std::int32_t i = 0; i < 10; i++) {
+			Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 10), Explosion::Type::IceShrapnel,
+				scale, Vector2f(GetFrozenMomentumX(), _speed.Y));
+		}
+
+		Explosion::Create(_levelHandler, Vector3i((std::int32_t)_pos.X, (std::int32_t)_pos.Y, _renderer.layer() + 90), Explosion::Type::SmokeWhite, scale);
+
+		_levelHandler->PlayCommonSfx("IceBreak"_s, Vector3f(_pos.X, _pos.Y, 0.0f));
+		return true;
 	}
 
 	void ActorBase::HandleFrozenStateChange(ActorBase* shot)
 	{
 		if (auto* freezerShot = runtime_cast<Weapons::FreezerShot>(shot)) {
 			if (runtime_cast<ActorBase>(freezerShot->GetOwner()) != this) {
-				_frozenTimeLeft = freezerShot->FrozenDuration();
+				_frozenTimeLeft = freezerShot->GetFrozenDuration();
 				_renderer.AnimPaused = true;
 				freezerShot->DecreaseHealth(INT32_MAX);
 			}
@@ -1930,6 +2002,11 @@ namespace Jazz2::Actors
 		}
 
 		if (_health <= 0) {
+#if defined(WITH_ANGELSCRIPT)
+			if DEATH_UNLIKELY(_updateOverride != nullptr && _updateOverride->OnPerish(this, collider)) {
+				return;
+			}
+#endif
 			OnPerish(collider);
 		} else {
 			OnHealthChanged(collider);
@@ -1974,9 +2051,9 @@ namespace Jazz2::Actors
 	}
 
 	ActorBase::ActorRenderer::ActorRenderer(ActorBase* owner)
-		: BaseSprite(nullptr, nullptr, 0.0f, 0.0f), AnimPaused(false), FrameSource(nullptr), LoopMode(AnimationLoopMode::Loop), FirstFrame(0),
-			FrameCount(0), AnimDuration(0.0f), AnimTime(0.0f), CurrentFrame(0), _owner(owner),
-			_rendererType((ActorRendererType)-1), _rendererTransition(0.0f), _paletteOffset(-1), _baseIndexed(false), _basePaletteOffset(0)
+		: BaseSprite(nullptr, nullptr, 0.0f, 0.0f), FrameSource(nullptr), LoopMode(AnimationLoopMode::Loop), FirstFrame(0),
+			FrameCount(0), AnimDuration(0.0f), AnimTime(0.0f), CurrentFrame(0), AnimPaused(false), _baseIndexed(false),
+			_rendererType((ActorRendererType)-1), _owner(owner), _rendererTransition(0.0f), _paletteOffset(-1), _basePaletteOffset(0)
 	{
 		_type = ObjectType::Sprite;
 		_renderCommand.SetType(RenderCommand::Type::Sprite);
@@ -2094,9 +2171,25 @@ namespace Jazz2::Actors
 		// took stays available to the swept tests that run afterwards (see ActorBase::HasCrossedOver())
 		_owner->_frameStartPos = _owner->_pos;
 
+#if defined(WITH_ANGELSCRIPT)
+		// An object a level script drives updates through the script, which runs the object's own update when it wants
+		if DEATH_UNLIKELY(_owner->_updateOverride != nullptr) {
+			_owner->_updateOverride->OnUpdate(_owner, timeMult);
+		} else {
+			_owner->OnUpdate(timeMult);
+		}
+#else
 		_owner->OnUpdate(timeMult);
+#endif
 
 		_owner->UpdateRendererPosition();
+
+#if defined(WITH_ANGELSCRIPT)
+		// A level script can make the graphics true color while they're drawn (see Scripting::Legacy::AnimationTables)
+		if DEATH_UNLIKELY(FrameSource != nullptr && _baseIndexed != ((FrameSource->Flags & GenericGraphicResourceFlags::Indexed) == GenericGraphicResourceFlags::Indexed)) {
+			SetIndexed(!_baseIndexed, _basePaletteOffset);
+		}
+#endif
 
 		if (IsAnimationRunning()) {
 			switch (LoopMode) {
@@ -2153,6 +2246,13 @@ namespace Jazz2::Actors
 
 	bool ActorBase::ActorRenderer::OnDraw(RenderQueue& renderQueue)
 	{
+#if defined(WITH_ANGELSCRIPT)
+		// A behavior of a level script draws the object only when it asks for it
+		if DEATH_UNLIKELY(_owner->_updateOverride != nullptr && !_owner->_updateOverride->IsDrawn()) {
+			return true;
+		}
+#endif
+
 		if (_owner->OnDraw(renderQueue)) {
 			return true;
 		}

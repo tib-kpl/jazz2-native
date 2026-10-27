@@ -70,6 +70,13 @@ namespace Jazz2
 	}
 #endif
 
+#if defined(WITH_EDITOR)
+	namespace Editor
+	{
+		class PlayTestDebug;
+	}
+#endif
+
 	/**
 		@brief Level handler of a local game session
 		
@@ -92,6 +99,9 @@ namespace Jazz2
 		friend class UI::Menu::InGameMenu;
 #if defined(WITH_PHYSICS_PROBE)
 		friend class Tests::PhysicsProbe;
+#endif
+#if defined(WITH_EDITOR)
+		friend class Editor::PlayTestDebug;
 #endif
 
 	public:
@@ -184,6 +194,7 @@ namespace Jazz2
 
 		void OnBeginFrame() override;
 		void OnEndFrame() override;
+		void OnReplacing() override;
 		void OnInitializeViewport(std::int32_t width, std::int32_t height) override;
 		/** @brief Called when a console command is entered */
 		virtual bool OnConsoleCommand(StringView line);
@@ -223,13 +234,22 @@ namespace Jazz2
 		void RollbackToCheckpoint(Actors::Player* player) override;
 		void HandleActivateSugarRush(Actors::Player* player) override;
 		void HandleCreateParticleDebrisOnPerish(const Actors::ActorBase* self, Actors::ParticleDebrisEffect effect, Vector2f speed) override;
-		void HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count) override;
+		void HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count, float elasticity) override;
 		void ShowLevelText(StringView text, Actors::ActorBase* initiator = nullptr) override;
 		StringView GetLevelText(std::uint32_t textId, std::int32_t index = -1, std::uint32_t delimiter = 0) override;
 		void OverrideLevelText(std::uint32_t textId, StringView value) override;
+		/** @brief Returns a level text as the original game had it, for scripts, the level text if the level has none (see @ref Formats::ScriptTextsChunk) */
+		StringView GetScriptText(std::uint32_t textId);
+		/** @brief Sets a level text as the original game has it, which scripts read back, the text shown has to be set too */
+		void OverrideScriptText(std::uint32_t textId, StringView value);
+		/** @brief Returns the custom weapons the level sets up for its script, empty if it has none (see @ref Formats::CustomWeaponsChunk) */
+		ArrayView<const std::uint8_t> GetCustomWeapons() const {
+			return _customWeapons;
+		}
 		Vector2f GetCameraPos(Actors::Player* player) const override;
 		void LimitCameraView(Actors::Player* player, Vector2f playerPos, std::int32_t left, std::int32_t width) override;
-		void OverrideCameraView(Actors::Player* player, float x, float y, bool topLeft = false) override;
+		void OverrideCameraView(Actors::Player* player, CameraOverride modeX, float x, CameraOverride modeY, float y,
+			bool centered = false, bool instant = true) override;
 		void ShakeCameraView(Actors::Player* player, float duration) override;
 		void ShakeCameraViewNear(Vector2f pos, float duration) override;
 		bool GetTrigger(std::uint8_t triggerId) override;
@@ -247,11 +267,23 @@ namespace Jazz2
 
 		bool SerializeResumableToStream(Stream& dest) override;
 
+		/**
+		 * @brief Returns how far the time of the level goes in this frame, in frames at 60 FPS
+		 *
+		 * The time of the application, unless a play-test of the level editor slows the level down or stops it, see
+		 * @ref GetPlayTestDebug().
+		 */
+		float GetLevelTimeMult() const;
+		/**
+		 * @brief Takes which keys are held from the keyboard again, or lets all of them go
+		 *
+		 * For a level that didn't get the keyboard for a while, as one played from the level editor, the keys
+		 * pressed and released meanwhile went elsewhere. With @p fromKeyboard the keys held now are held in the
+		 * level too, otherwise none is.
+		 */
+		void ResetPressedKeys(bool fromKeyboard);
+
 #if defined(WITH_EDITOR) || defined(DOXYGEN_GENERATING_OUTPUT)
-		/** @brief Returns 	rue if the level can be opened in the level editor from the pause menu */
-		virtual bool CanOpenInEditor() const;
-		/** @brief Leaves the level and opens it in the level editor */
-		void OpenInEditor();
 		/** @brief Takes the level off the screen, until its viewports are initialized again */
 		void SuspendRendering();
 #	if defined(WITH_AUDIO)
@@ -278,7 +310,13 @@ namespace Jazz2
 		virtual bool IsEditorPlayTest() const;
 		/** @brief Leaves the level editor the level is played from */
 		virtual void ExitEditor();
+		/** @brief Returns the debug tools of a level played from the level editor, or `nullptr` in a game */
+		Editor::PlayTestDebug* GetPlayTestDebug() const {
+			return _playTestDebug.get();
+		}
 #endif
+		/** @brief Returns the part of the level the view of a given player shows, from its top left corner, the whole view without one */
+		Rectf GetCameraView(Actors::Player* player) const;
 
 		void OnAdvanceDestructibleTileAnimation(std::int32_t tx, std::int32_t ty, std::int32_t amount) override {}
 		void OnTileFrozen(std::int32_t x, std::int32_t y) override;
@@ -339,6 +377,11 @@ namespace Jazz2
 		SmallVector<String, 0> _debugStartupCommands;
 #endif
 
+#if defined(WITH_EDITOR)
+		// Created by the play-tests of the level editor before the level is initialized, see GetPlayTestDebug(); the root
+		// node refers to it, so it's declared before it and outlives it
+		std::unique_ptr<Editor::PlayTestDebug> _playTestDebug;
+#endif
 		std::unique_ptr<SceneNode> _rootNode;
 		std::unique_ptr<Texture> _noiseTexture;
 		SmallVector<std::unique_ptr<Rendering::PlayerViewport>, 0> _assignedViewports;
@@ -364,9 +407,16 @@ namespace Jazz2
 		bool _isReforged, _cheatsUsed;
 		bool _checkpointCreated;
 		SmallVector<String, 0> _levelTexts;
-#if defined(WITH_EDITOR)
-		// The level wasn't exported only to be played, see LevelFlags::NotEditable
-		bool _levelEditable = true;
+		// Translations of the level texts the level carries, see Formats::LevelTextsChunk
+		SmallVector<LocalizedLevelTexts, 0> _localizedLevelTexts;
+		// The level texts as the original game had them, see Formats::ScriptTextsChunk
+		SmallVector<String, 0> _scriptTexts;
+		SmallVector<std::uint8_t, 0> _customWeapons;
+#if defined(WITH_ANGELSCRIPT)
+		// Tile images the level replaces, for the script to read (see LevelScriptLoader::ResolveTileSetPixels())
+		SmallVector<Formats::TileDiffuseOverride, 0> _tileDiffuseOverrides;
+		// Sprites the level recolors, for the script to apply, see Formats::SpriteRecolorsChunk
+		SmallVector<std::uint8_t, 0> _spriteRecolors;
 #endif
 
 		Events::EventSpawner _eventSpawner;
@@ -471,7 +521,7 @@ namespace Jazz2
 
 			The offset exists only so players do not start standing inside one another, and applying it blind
 			puts the second one inside the tileset wherever the level starts in a tight space --- reported on
-			`rescue/02_colon2`, where the start is barely taller than the player and the lift buried them from
+			`rescue/colon2`, where the start is barely taller than the player and the lift buried them from
 			the first frame. Tried at full strength, then at half, then not at all.
 
 			Shared with @ref Multiplayer::MpLevelHandler, which spawns local splitscreen players through its
@@ -549,6 +599,10 @@ namespace Jazz2
 		virtual void PauseGame();
 		/** @brief Resumes the paused game */
 		virtual void ResumeGame();
+		/** @brief Pauses all sound effects that are playing, see @ref ResumeAllSfx() */
+		void PauseAllSfx();
+		/** @brief Plays all paused sound effects again */
+		void ResumeAllSfx();
 		/** @brief Shows the in-game console */
 		virtual void ShowConsole();
 		/** @brief Hides the in-game console */
@@ -593,5 +647,8 @@ namespace Jazz2
 		void CheatMorph(ArrayView<Actors::Player* const> targets);
 		void CheatShield(ArrayView<Actors::Player* const> targets);
 		void CheatFly(ArrayView<Actors::Player* const> targets);
+
+		// Creates the node every object of the level is under, it runs on the time of the play-test with the level editor
+		std::unique_ptr<SceneNode> CreateRootNode();
 	};
 }

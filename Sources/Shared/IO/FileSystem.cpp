@@ -37,7 +37,7 @@
 		!defined(DEATH_TARGET_MORPHOS)
 #		include <ftw.h>
 #	endif
-#	include <libgen.h>
+#	include <limits.h>
 #	include <pwd.h>
 #	include <strings.h>
 #	include <sys/stat.h>
@@ -604,20 +604,6 @@ namespace Death { namespace IO {
 			}
 		}
 
-		/** @brief Returns the last component of @p path, which must be writable and null-terminated */
-		static const char* GetBaseName(char* path)
-		{
-#	if defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_PS3)
-			// PS2SDK's newlib declares no basename(), and neither does the powerpc64-ps3-elf one behind
-			// PSL1GHT (<libgen.h> is present, but nothing implements the symbol). The callers only need the
-			// last path component, for which the trailing-slash handling POSIX basename() adds makes no difference
-			const char* lastSeparator = std::strrchr(path, '/');
-			return (lastSeparator != nullptr ? lastSeparator + 1 : path);
-#	else
-			return ::basename(path);
-#	endif
-		}
-
 		static FileSystem::Permission NativeModeToEnum(std::uint32_t nativeMode)
 		{
 			FileSystem::Permission mode = FileSystem::Permission::None;
@@ -837,19 +823,8 @@ namespace Death { namespace IO {
 				}
 
 				// Prepare full path to found files
-				{
-					String absPath = GetAbsolutePath(path);
-					std::size_t pathLength = absPath.size();
-					std::memcpy(_path, absPath.data(), pathLength);
-					if (_path[pathLength - 1] == '/' || _path[pathLength - 1] == '\\') {
-						_path[pathLength - 1] = '\\';
-						_path[pathLength] = '\0';
-						_fileNamePart = _path + pathLength;
-					} else {
-						_path[pathLength] = '\\';
-						_path[pathLength + 1] = '\0';
-						_fileNamePart = _path + pathLength + 1;
-					}
+				if (!SetDirectoryPath(GetAbsolutePath(path), '\\')) {
+					return false;
 				}
 
 				std::size_t pathLength = (_fileNamePart - _path);
@@ -888,16 +863,9 @@ namespace Death { namespace IO {
 					if ((_options & EnumerationOptions::SkipFiles) != EnumerationOptions::SkipFiles) {
 						_assetDir = AndroidAssetStream::OpenDirectory(strippedPath);
 						if (_assetDir != nullptr) {
-							std::size_t pathLength = path.size();
-							std::memcpy(_path, path.data(), pathLength);
-							if (_path[pathLength - 1] == '/' || _path[pathLength - 1] == '\\') {
-								_path[pathLength - 1] = '/';
-								_path[pathLength] = '\0';
-								_fileNamePart = _path + pathLength;
-							} else {
-								_path[pathLength] = '/';
-								_path[pathLength + 1] = '\0';
-								_fileNamePart = _path + pathLength + 1;
+							if (!SetDirectoryPath(path, '/')) {
+								Close();
+								return false;
 							}
 							Increment();
 							return true;
@@ -914,16 +882,9 @@ namespace Death { namespace IO {
 						// entry at the root, and the separator check below read in front of the buffer
 						absPath = path;
 					}
-					std::size_t pathLength = absPath.size();
-					std::memcpy(_path, absPath.data(), pathLength);
-					if (_path[pathLength - 1] == '/' || _path[pathLength - 1] == '\\') {
-						_path[pathLength - 1] = '/';
-						_path[pathLength] = '\0';
-						_fileNamePart = _path + pathLength;
-					} else {
-						_path[pathLength] = '/';
-						_path[pathLength + 1] = '\0';
-						_fileNamePart = _path + pathLength + 1;
+					if (!SetDirectoryPath(absPath, '/')) {
+						Close();
+						return false;
 					}
 					Increment();
 					return true;
@@ -1013,13 +974,20 @@ namespace Death { namespace IO {
 #	if defined(DEATH_TARGET_ANDROID)
 			// It does not return directory names
 			if (_assetDir != nullptr) {
-				const char* assetName = AndroidAssetStream::GetNextFileName(_assetDir);
-				if DEATH_UNLIKELY(assetName == nullptr) {
-					_path[0] = '\0';
-					return;
+				std::size_t charsLeft = sizeof(_path) - (_fileNamePart - _path) - 1;
+				while (true) {
+					const char* assetName = AndroidAssetStream::GetNextFileName(_assetDir);
+					if DEATH_UNLIKELY(assetName == nullptr) {
+						_path[0] = '\0';
+						return;
+					}
+					std::size_t fileNameLength = std::strlen(assetName);
+					if DEATH_LIKELY(fileNameLength <= charsLeft) {
+						std::memcpy(_fileNamePart, assetName, fileNameLength + 1);
+						return;
+					}
+					// Path is too long, skip this file
 				}
-				strcpy(_fileNamePart, assetName);
-				return;
 			}
 #	endif
 			if DEATH_UNLIKELY(_dirStream == nullptr) {
@@ -1088,6 +1056,26 @@ namespace Death { namespace IO {
 #	endif
 		DIR* _dirStream;
 #endif
+
+		bool SetDirectoryPath(StringView directoryPath, char separator)
+		{
+			std::size_t pathLength = directoryPath.size();
+			if (pathLength == 0 || pathLength + 2 >= sizeof(_path)) {
+				_path[0] = '\0';
+				return false;
+			}
+			std::memcpy(_path, directoryPath.data(), pathLength);
+			if (_path[pathLength - 1] == '/' || _path[pathLength - 1] == '\\') {
+				_path[pathLength - 1] = separator;
+				_path[pathLength] = '\0';
+				_fileNamePart = _path + pathLength;
+			} else {
+				_path[pathLength] = separator;
+				_path[pathLength + 1] = '\0';
+				_fileNamePart = _path + pathLength + 1;
+			}
+			return true;
+		}
 	};
 
 	class FileSystem::Directory::Proxy
@@ -1492,6 +1480,15 @@ namespace Death { namespace IO {
 		if (length == 0) {
 			return {};
 		}
+		if (length >= arraySize(buffer)) {
+			// Too small, the result is the required size
+			Array<wchar_t> largeBuffer{NoInit, length};
+			DWORD largeLength = ::GetFullPathNameW(pathW.data(), length, largeBuffer.data(), nullptr);
+			if (largeLength == 0 || largeLength >= length) {
+				return {};
+			}
+			return Utf8::FromUtf16(largeBuffer.data(), largeLength);
+		}
 
 		return Utf8::FromUtf16(buffer, length);
 #elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_VITA) || \
@@ -1505,15 +1502,21 @@ namespace Death { namespace IO {
 		std::int32_t symlinks = 0;
 #	endif
 
+		// The view may not be null-terminated
 		std::size_t pathRootLength = GetPathRootLength(path);
 		if (pathRootLength > 0) {
-			strncpy(result, path.data(), pathRootLength);
+			if (pathRootLength >= sizeof(result) || path.size() - pathRootLength >= sizeof(left)) {
+				// Path is too long
+				return path;
+			}
+			std::memcpy(result, path.data(), pathRootLength);
 			resultLength = pathRootLength;
 			if (path.size() == pathRootLength) {
 				return String{result, resultLength};
 			}
 
-			strncpy(left, path.data() + pathRootLength, sizeof(left));
+			std::memcpy(left, path.data() + pathRootLength, path.size() - pathRootLength);
+			left[path.size() - pathRootLength] = '\0';
 		} else {
 #	if defined(DEATH_TARGET_N64)
 			// libdragon's newlib has no working directory at all - every reachable path carries its mount
@@ -1524,11 +1527,16 @@ namespace Death { namespace IO {
 				return "."_s;
 			}
 			resultLength = std::strlen(result);
-			strncpy(left, path.data(), sizeof(left));
+			if (path.size() >= sizeof(left)) {
+				// Path is too long
+				return path;
+			}
+			std::memcpy(left, path.data(), path.size());
+			left[path.size()] = '\0';
 #	endif
 		}
 		std::size_t leftLength = std::strlen(left);
-		if (leftLength >= sizeof(left) || resultLength >= MaxPathLength) {
+		if (resultLength >= MaxPathLength) {
 			// Path is too long
 			return path;
 		}
@@ -1606,17 +1614,21 @@ namespace Death { namespace IO {
 				}
 
 				if (p != nullptr) {
-					if (nextToken[symlinkLength - 1] != '/') {
+					if (symlinkLength > 0 && nextToken[symlinkLength - 1] != '/') {
 						if (static_cast<std::size_t>(symlinkLength) + 1 >= sizeof(nextToken)) {
 							// Path is too long
 							return {};
 						}
 						nextToken[symlinkLength++] = '/';
 					}
-					strncpy(nextToken + symlinkLength, left, sizeof(nextToken) - symlinkLength);
+					if (static_cast<std::size_t>(symlinkLength) + leftLength >= sizeof(nextToken)) {
+						// Path is too long
+						return {};
+					}
+					std::memcpy(nextToken + symlinkLength, left, leftLength + 1);
 				}
-				strncpy(left, nextToken, sizeof(left));
-				leftLength = std::strlen(left);
+				leftLength = std::strlen(nextToken);
+				std::memcpy(left, nextToken, leftLength + 1);
 			}
 #	endif
 		}
@@ -2217,18 +2229,13 @@ namespace Death { namespace IO {
 		struct stat sb;
 		return (::stat(nullTerminatedPath.data(), &sb) == 0 && (sb.st_flags & UF_HIDDEN) == UF_HIDDEN);
 #else
-		auto nullTerminatedPath = String::nullTerminatedView(path);
 #	if defined(DEATH_TARGET_ANDROID)
-		if (AndroidAssetStream::TryGetAssetPath(nullTerminatedPath)) {
+		if (AndroidAssetStream::TryGetAssetPath(path)) {
 			return false;
 		}
 #	endif
-		char buffer[MaxPathLength];
-		std::size_t pathLength = std::min((std::size_t)MaxPathLength - 1, path.size());
-		strncpy(buffer, path.data(), pathLength);
-		buffer[pathLength] = '\0';
-		const char* baseName = GetBaseName(buffer);
-		return (baseName != nullptr && baseName[0] == '.');
+		StringView fileName = GetFileName(path);
+		return (!fileName.empty() && fileName[0] == '.');
 #endif
 	}
 
@@ -2287,20 +2294,20 @@ namespace Death { namespace IO {
 			return false;
 		}
 #	endif
-		char buffer[MaxPathLength];
-		std::size_t pathLength = std::min((std::size_t)MaxPathLength - 1, path.size());
-		strncpy(buffer, nullTerminatedPath.data(), pathLength);
-		buffer[pathLength] = '\0';
-		const char* baseName = GetBaseName(buffer);
-		if (hidden && baseName != nullptr && baseName[0] != '.') {
-			String newPath = CombinePath(GetDirectoryName(nullTerminatedPath), String("."_s + baseName));
+		StringView fileName = GetFileName(nullTerminatedPath);
+		if (hidden && !fileName.empty() && fileName[0] != '.') {
+			String newPath = CombinePath(GetDirectoryName(nullTerminatedPath), String("."_s + fileName));
 			return (::rename(nullTerminatedPath.data(), newPath.data()) == 0);
-		} else if (!hidden && baseName != nullptr && baseName[0] == '.') {
-			std::int32_t numDots = 0;
-			while (baseName[numDots] == '.') {
+		} else if (!hidden && !fileName.empty() && fileName[0] == '.') {
+			std::size_t numDots = 0;
+			while (numDots < fileName.size() && fileName[numDots] == '.') {
 				numDots++;
 			}
-			String newPath = CombinePath(GetDirectoryName(nullTerminatedPath), &buffer[numDots]);
+			if (numDots == fileName.size()) {
+				// "." or "..", there is no name left to rename it to
+				return false;
+			}
+			String newPath = CombinePath(GetDirectoryName(nullTerminatedPath), fileName.exceptPrefix(numDots));
 			return (::rename(nullTerminatedPath.data(), newPath.data()) == 0);
 		}
 #endif
@@ -2689,11 +2696,12 @@ namespace Death { namespace IO {
 			return false;
 		}
 
-#if !defined(DEATH_TARGET_APPLE) && !defined(DEATH_TARGET_SWITCH) && !defined(DEATH_TARGET_3DS) && \
-		!defined(DEATH_TARGET_PS2) && !defined(DEATH_TARGET_PSP) && !defined(DEATH_TARGET_VITA) && \
-		!defined(DEATH_TARGET_WII) && !defined(DEATH_TARGET_GAMECUBE) && !defined(DEATH_TARGET_DREAMCAST) && \
-		!defined(DEATH_TARGET_PS3) && !defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_AMIGAOS) && \
-		!defined(DEATH_TARGET_AMIGAOS4) && !defined(DEATH_TARGET_MORPHOS) && !defined(__FreeBSD__)
+#if !defined(DEATH_TARGET_APPLE) && !defined(DEATH_TARGET_EMSCRIPTEN) && !defined(DEATH_TARGET_SWITCH) && \
+		!defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_GAMECUBE) && !defined(DEATH_TARGET_WII) && \		
+		!defined(DEATH_TARGET_3DS) && !defined(DEATH_TARGET_PS2) && !defined(DEATH_TARGET_PS3) && \
+		!defined(DEATH_TARGET_PSP) && !defined(DEATH_TARGET_VITA) && !defined(DEATH_TARGET_DREAMCAST) && \
+		!defined(DEATH_TARGET_AMIGAOS) && !defined(DEATH_TARGET_AMIGAOS4) && !defined(DEATH_TARGET_MORPHOS) && \
+		!defined(__FreeBSD__)
 		while (true) {
 			if (::fallocate(destFd, FALLOC_FL_KEEP_SIZE, 0, sb.st_size) == 0) {
 				break;
@@ -2814,7 +2822,7 @@ namespace Death { namespace IO {
 
 	std::int64_t FileSystem::GetFileSize(StringView path)
 	{
-		if (path.empty()) return false;
+		if (path.empty()) return -1;
 
 #if defined(DEATH_TARGET_WINDOWS)
 #	if defined(DEATH_TARGET_WINDOWS_RT)
@@ -2826,6 +2834,9 @@ namespace Death { namespace IO {
 		Utf8::ToUtf16(pathW.data(), std::int32_t(pathW.size()), path.data(), std::int32_t(path.size()));
 		HANDLE hFile = ::CreateFileW(pathW.data(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
 #	endif
+		if (hFile == INVALID_HANDLE_VALUE) {
+			return -1;
+		}
 		LARGE_INTEGER fileSize;
 		fileSize.QuadPart = 0;
 		const BOOL status = ::GetFileSizeEx(hFile, &fileSize);

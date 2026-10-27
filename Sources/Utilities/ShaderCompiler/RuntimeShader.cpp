@@ -40,9 +40,7 @@ namespace ShaderCompiler
 			ShaderParser::StripComments(lines);
 
 			Preprocessor preprocessor;
-			if (!define.empty()) {
-				preprocessor.Define(define, "1");
-			}
+			preprocessor.DefineVariant(define);
 			SmallVector<SourceLine, 0> preprocessed;
 			if (!preprocessor.Run(lines, preprocessed, diag)) {
 				return false;
@@ -131,7 +129,7 @@ namespace ShaderCompiler
 		{
 			String includeError;
 			if (!ShaderParser::ExpandIncludes(expanded, baseDir, reader, 0, includeError)) {
-				diag.Message = std::move(includeError);
+				diag.Message = Death::move(includeError);
 				diag.Line = 0;
 				return false;
 			}
@@ -150,13 +148,13 @@ namespace ShaderCompiler
 		out.Variants.clear();
 
 		// The unnamed base variant (Name "", always Variants[0]) plus one additional entry
-		// per declared variant (no cross-products)
+		// per declared variant (a combination is declared as a variant of its own)
 		out.Variants.emplace_back();
-		for (const String& name : document.Variants) {
+		for (const VariantDirective& variant : document.Variants) {
 			RuntimeVariant v;
-			v.Name = name;
-			v.Define = name;
-			out.Variants.push_back(std::move(v));
+			v.Name = variant.Name;
+			v.Define = variant.Define;
+			out.Variants.push_back(Death::move(v));
 		}
 
 		for (RuntimeVariant& v : out.Variants) {

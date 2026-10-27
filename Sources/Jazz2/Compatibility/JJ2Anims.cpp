@@ -354,107 +354,7 @@ namespace Jazz2::Compatibility
 				continue;
 			}
 
-			for (std::uint16_t j = 0; j < animCount; j++) {
-				AnimSection& anim = anims.emplace_back();
-				anim.Set = i;
-				anim.Anim = j;
-				anim.FrameCount = infoBlock.ReadUInt16();
-				anim.FrameRate = infoBlock.ReadUInt16();
-				anim.Frames.resize(anim.FrameCount);
-
-				// Skip the rest, seems to be 0x00000000 for all headers
-				infoBlock.DiscardBytes(4);
-
-				if (anim.FrameCount > 0) {
-					for (std::uint16_t k = 0; k < anim.FrameCount; k++) {
-						AnimFrameSection& frame = anim.Frames[k];
-
-						frame.SizeX = frameDataBlock.ReadInt16();
-						frame.SizeY = frameDataBlock.ReadInt16();
-						frame.ColdspotX = frameDataBlock.ReadInt16();
-						frame.ColdspotY = frameDataBlock.ReadInt16();
-						frame.HotspotX = frameDataBlock.ReadInt16();
-						frame.HotspotY = frameDataBlock.ReadInt16();
-						frame.GunspotX = frameDataBlock.ReadInt16();
-						frame.GunspotY = frameDataBlock.ReadInt16();
-
-						frame.ImageAddr = frameDataBlock.ReadInt32();
-						frame.MaskAddr = frameDataBlock.ReadInt32();
-
-						// Adjust normalized position
-						// In the output images, we want to make the hotspot and image size constant.
-						anim.NormalizedHotspotX = std::max((std::int16_t)-frame.HotspotX, anim.NormalizedHotspotX);
-						anim.NormalizedHotspotY = std::max((std::int16_t)-frame.HotspotY, anim.NormalizedHotspotY);
-
-						anim.LargestOffsetX = std::max((std::int16_t)(frame.SizeX + frame.HotspotX), anim.LargestOffsetX);
-						anim.LargestOffsetY = std::max((std::int16_t)(frame.SizeY + frame.HotspotY), anim.LargestOffsetY);
-
-						anim.AdjustedSizeX = std::max(
-							(std::int16_t)(anim.NormalizedHotspotX + anim.LargestOffsetX),
-							anim.AdjustedSizeX
-						);
-						anim.AdjustedSizeY = std::max(
-							(std::int16_t)(anim.NormalizedHotspotY + anim.LargestOffsetY),
-							anim.AdjustedSizeY
-						);
-
-						std::int32_t dpos = (frame.ImageAddr + 4);
-
-						imageDataBlock.SeekTo(dpos - 4);
-						std::uint16_t width2 = imageDataBlock.ReadUInt16();
-						imageDataBlock.SeekTo(dpos - 2);
-						/*std::uint16_t height2 =*/ imageDataBlock.ReadUInt16();
-
-						frame.DrawTransparent = (width2 & 0x8000) > 0;
-
-						std::int32_t pxRead = 0;
-						std::int32_t pxTotal = (frame.SizeX * frame.SizeY);
-						bool lastOpEmpty = true;
-
-						frame.ImageData = std::make_unique<std::uint8_t[]>(pxTotal);
-
-						imageDataBlock.SeekTo(dpos);
-
-						while (pxRead < pxTotal) {
-							std::uint8_t op = imageDataBlock.ReadByte();
-							if (op < 0x80) {
-								// Skip the given number of pixels, writing them with the transparent color 0, array should be already zeroed
-								pxRead += op;
-							} else if (op == 0x80) {
-								// Skip until the end of the line, array should be already zeroed
-								std::uint16_t linePxLeft = (std::uint16_t)(frame.SizeX - pxRead % frame.SizeX);
-								if (pxRead % frame.SizeX == 0 && !lastOpEmpty) {
-									linePxLeft = 0;
-								}
-
-								pxRead += linePxLeft;
-							} else {
-								// Copy specified amount of pixels (ignoring the high bit)
-								std::uint16_t bytesToRead = (std::uint16_t)(op & 0x7F);
-								imageDataBlock.ReadRawBytes(frame.ImageData.get() + pxRead, bytesToRead);
-								pxRead += bytesToRead;
-							}
-
-							lastOpEmpty = (op == 0x80);
-						}
-
-						// TODO: Sprite mask
-						/*frame.MaskData = std::make_unique<std::uint8_t[]>(pxTotal);
-
-						if (frame.MaskAddr != 0xFFFFFFFF) {
-							imageDataBlock.SeekTo(frame.MaskAddr);
-							pxRead = 0;
-							while (pxRead < pxTotal) {
-								std::uint8_t b = imageDataBlock.ReadByte();
-								for (std::uint8_t bit = 0; bit < 8 && (pxRead + bit) < pxTotal; ++bit) {
-									frame.MaskData[pxRead + bit] = ((b & (1 << (7 - bit))) != 0);
-								}
-								pxRead += 8;
-							}
-						}*/
-					}
-				}
-			}
+			ReadAnimations(i, animCount, infoBlock, frameDataBlock, imageDataBlock, anims);
 
 			if (i == 65 && animCount > 5) {
 				seemsLikeCC = true;
@@ -568,6 +468,160 @@ namespace Jazz2::Compatibility
 		return version;
 	}
 
+	bool JJ2Anims::ReadAnimationSet(std::unique_ptr<Stream>& s, std::int32_t setIndex, SmallVectorImpl<AnimSection>& anims)
+	{
+		// The header Convert() reads, but the version isn't checked - files made by other tools than the game's
+		// own may say anything there
+		std::uint32_t magic = s->ReadValueAsLE<std::uint32_t>();
+		std::uint32_t signature = s->ReadValueAsLE<std::uint32_t>();
+		if (magic != 0x42494C41 || signature != 0x00BEBA00) {
+			return false;
+		}
+
+		/*std::uint32_t headerLen =*/ s->ReadValueAsLE<std::uint32_t>();
+		/*std::uint32_t magicUnknown =*/ s->ReadValueAsLE<std::uint32_t>();
+		/*std::uint32_t fileLen =*/ s->ReadValueAsLE<std::uint32_t>();
+		/*std::uint32_t crc =*/ s->ReadValueAsLE<std::uint32_t>();
+		std::int32_t setCount = s->ReadValueAsLE<std::int32_t>();
+		if (setIndex < 0 || setIndex >= setCount) {
+			return false;
+		}
+
+		std::uint32_t setAddress = 0;
+		for (std::int32_t i = 0; i <= setIndex; i++) {
+			setAddress = s->ReadValueAsLE<std::uint32_t>();
+		}
+		if (setAddress == 0 || std::int64_t(setAddress) >= s->GetSize()) {
+			return false;
+		}
+		s->Seek(setAddress, SeekOrigin::Begin);
+
+		std::uint32_t magicANIM = s->ReadValueAsLE<std::uint32_t>();
+		std::uint8_t animCount = s->ReadValue<std::uint8_t>();
+		/*std::uint8_t sndCount =*/ s->ReadValue<std::uint8_t>();
+		/*std::uint16_t frameCount =*/ s->ReadValueAsLE<std::uint16_t>();
+		/*std::uint32_t cumulativeSndIndex =*/ s->ReadValueAsLE<std::uint32_t>();
+		std::int32_t infoBlockLenC = s->ReadValueAsLE<std::int32_t>();
+		std::int32_t infoBlockLenU = s->ReadValueAsLE<std::int32_t>();
+		std::int32_t frameDataBlockLenC = s->ReadValueAsLE<std::int32_t>();
+		std::int32_t frameDataBlockLenU = s->ReadValueAsLE<std::int32_t>();
+		std::int32_t imageDataBlockLenC = s->ReadValueAsLE<std::int32_t>();
+		std::int32_t imageDataBlockLenU = s->ReadValueAsLE<std::int32_t>();
+		if (magicANIM != 0x4D494E41) {
+			return false;
+		}
+
+		// The samples of the set are left where they are, the block isn't needed
+		s->Seek(8, SeekOrigin::Current);
+
+		JJ2Block infoBlock(s, infoBlockLenC, infoBlockLenU);
+		JJ2Block frameDataBlock(s, frameDataBlockLenC, frameDataBlockLenU);
+		JJ2Block imageDataBlock(s, imageDataBlockLenC, imageDataBlockLenU);
+
+		ReadAnimations(setIndex, animCount, infoBlock, frameDataBlock, imageDataBlock, anims);
+		return true;
+	}
+
+	void JJ2Anims::ReadAnimations(std::int32_t setIndex, std::uint8_t animCount, JJ2Block& infoBlock, JJ2Block& frameDataBlock,
+		JJ2Block& imageDataBlock, SmallVectorImpl<AnimSection>& anims)
+	{
+		for (std::uint16_t j = 0; j < animCount; j++) {
+			AnimSection& anim = anims.emplace_back();
+			anim.Set = setIndex;
+			anim.Anim = j;
+			anim.FrameCount = infoBlock.ReadUInt16();
+			anim.FrameRate = infoBlock.ReadUInt16();
+			anim.Frames.resize(anim.FrameCount);
+
+			// Skip the rest, seems to be 0x00000000 for all headers
+			infoBlock.DiscardBytes(4);
+
+			if (anim.FrameCount > 0) {
+				for (std::uint16_t k = 0; k < anim.FrameCount; k++) {
+					AnimFrameSection& frame = anim.Frames[k];
+
+					frame.SizeX = frameDataBlock.ReadInt16();
+					frame.SizeY = frameDataBlock.ReadInt16();
+					frame.ColdspotX = frameDataBlock.ReadInt16();
+					frame.ColdspotY = frameDataBlock.ReadInt16();
+					frame.HotspotX = frameDataBlock.ReadInt16();
+					frame.HotspotY = frameDataBlock.ReadInt16();
+					frame.GunspotX = frameDataBlock.ReadInt16();
+					frame.GunspotY = frameDataBlock.ReadInt16();
+
+					frame.ImageAddr = frameDataBlock.ReadInt32();
+					frame.MaskAddr = frameDataBlock.ReadInt32();
+
+					// A file that isn't the game's own can say anything, a frame of no size is only an empty one
+					if (frame.SizeX <= 0 || frame.SizeY <= 0) {
+						frame.SizeX = 0;
+						frame.SizeY = 0;
+					}
+
+					std::int32_t dpos = (frame.ImageAddr + 4);
+
+					imageDataBlock.SeekTo(dpos - 4);
+					std::uint16_t width2 = imageDataBlock.ReadUInt16();
+					imageDataBlock.SeekTo(dpos - 2);
+					/*std::uint16_t height2 =*/ imageDataBlock.ReadUInt16();
+
+					frame.DrawTransparent = (width2 & 0x8000) > 0;
+
+					std::int32_t pxRead = 0;
+					std::int32_t pxTotal = (frame.SizeX * frame.SizeY);
+					bool lastOpEmpty = true;
+
+					frame.ImageData = std::make_unique<std::uint8_t[]>(pxTotal);
+
+					imageDataBlock.SeekTo(dpos);
+
+					// The end of the block ends the image too, the rest stays transparent
+					while (pxRead < pxTotal && !imageDataBlock.ReachedEndOfStream()) {
+						std::uint8_t op = imageDataBlock.ReadByte();
+						if (op < 0x80) {
+							// Skip the given number of pixels, writing them with the transparent color 0, array should be already zeroed
+							pxRead += op;
+						} else if (op == 0x80) {
+							// Skip until the end of the line, array should be already zeroed
+							std::uint16_t linePxLeft = (std::uint16_t)(frame.SizeX - pxRead % frame.SizeX);
+							if (pxRead % frame.SizeX == 0 && !lastOpEmpty) {
+								linePxLeft = 0;
+							}
+
+							pxRead += linePxLeft;
+						} else {
+							// Copy specified amount of pixels (ignoring the high bit), never past the end of the frame
+							std::int32_t bytesToRead = (op & 0x7F);
+							std::int32_t bytesToCopy = std::min<std::int32_t>(bytesToRead, pxTotal - pxRead);
+							imageDataBlock.ReadRawBytes(frame.ImageData.get() + pxRead, bytesToCopy);
+							imageDataBlock.DiscardBytes(bytesToRead - bytesToCopy);
+							pxRead += bytesToRead;
+						}
+
+						lastOpEmpty = (op == 0x80);
+					}
+
+					// TODO: Sprite mask
+					/*frame.MaskData = std::make_unique<std::uint8_t[]>(pxTotal);
+
+					if (frame.MaskAddr != 0xFFFFFFFF) {
+						imageDataBlock.SeekTo(frame.MaskAddr);
+						pxRead = 0;
+						while (pxRead < pxTotal) {
+							std::uint8_t b = imageDataBlock.ReadByte();
+							for (std::uint8_t bit = 0; bit < 8 && (pxRead + bit) < pxTotal; ++bit) {
+								frame.MaskData[pxRead + bit] = ((b & (1 << (7 - bit))) != 0);
+							}
+							pxRead += 8;
+						}
+					}*/
+				}
+
+				NormalizeAnimation(anim);
+			}
+		}
+	}
+
 	void JJ2Anims::ImportAnimations(PakWriter& pakWriter, JJ2Version version, SmallVectorImpl<AnimSection>& anims, ConversionProgress progress)
 	{
 		if (anims.empty()) {
@@ -591,6 +645,10 @@ namespace Jazz2::Compatibility
 			AnimSetMapping::Entry* entry = animMapping.Get(anim.Set, anim.Anim);
 			if (entry == nullptr || entry->Category == AnimSetMapping::Discard) {
 				continue;
+			}
+
+			if (entry->Category == "BirdyYellow"_s) {
+				FixYellowBirdSpots(anim, *entry, anims, animMapping);
 			}
 
 			std::int32_t sizeX = (anim.AdjustedSizeX + AddBorder * 2);
@@ -842,6 +900,145 @@ namespace Jazz2::Compatibility
 				normalMap.Save(filename.Replace(".png", ".n.png"));
 			}*/
 		}
+	}
+
+	void JJ2Anims::NormalizeAnimation(AnimSection& anim)
+	{
+		// In the output images, we want to make the hotspot and image size constant
+		anim.NormalizedHotspotX = 0;
+		anim.NormalizedHotspotY = 0;
+		anim.LargestOffsetX = 0;
+		anim.LargestOffsetY = 0;
+
+		for (const AnimFrameSection& frame : anim.Frames) {
+			anim.NormalizedHotspotX = std::max((std::int16_t)-frame.HotspotX, anim.NormalizedHotspotX);
+			anim.NormalizedHotspotY = std::max((std::int16_t)-frame.HotspotY, anim.NormalizedHotspotY);
+
+			anim.LargestOffsetX = std::max((std::int16_t)(frame.SizeX + frame.HotspotX), anim.LargestOffsetX);
+			anim.LargestOffsetY = std::max((std::int16_t)(frame.SizeY + frame.HotspotY), anim.LargestOffsetY);
+		}
+
+		anim.AdjustedSizeX = (std::int16_t)(anim.NormalizedHotspotX + anim.LargestOffsetX);
+		anim.AdjustedSizeY = (std::int16_t)(anim.NormalizedHotspotY + anim.LargestOffsetY);
+	}
+
+	void JJ2Anims::FixYellowBirdSpots(AnimSection& anim, const AnimSetMapping::Entry& entry, SmallVectorImpl<AnimSection>& anims, AnimSetMapping& animMapping)
+	{
+		auto findAnimation = [&anims, &animMapping](auto&& matches) -> const AnimSection* {
+			for (const AnimSection& other : anims) {
+				const AnimSetMapping::Entry* otherEntry = animMapping.Get(other.Set, other.Anim);
+				if (otherEntry != nullptr && matches(other, *otherEntry)) {
+					return &other;
+				}
+			}
+			return nullptr;
+		};
+
+		bool hasNoSpots = std::all_of(anim.Frames.begin(), anim.Frames.end(), [](const AnimFrameSection& frame) {
+			return (frame.HotspotX == 0 && frame.HotspotY == 0 && frame.ColdspotX == 0 && frame.ColdspotY == 0);
+		});
+		if (entry.Name == "idle_turn_head_left"_s && hasNoSpots) {
+			// Turning the head to the left has no spots at all, which drew it far below and to the right of where the bird
+			// stands. Its frames are the last four of turning the head to the right, which has them - one is a pixel wider.
+			const AnimSection* twin = findAnimation([](const AnimSection& other, const AnimSetMapping::Entry& otherEntry) {
+				return (otherEntry.Category == "BirdyYellow"_s && otherEntry.Name == "idle_turn_head_right"_s);
+			});
+			if (twin == nullptr) {
+				return;
+			}
+			SmallVector<const AnimFrameSection*, 8> twinFrames;
+			for (const AnimFrameSection& frame : anim.Frames) {
+				const AnimFrameSection* best = nullptr;
+				std::int32_t bestDifference = 2;
+				for (const AnimFrameSection& twinFrame : twin->Frames) {
+					std::int32_t difference = std::abs(twinFrame.SizeX - frame.SizeX);
+					if (twinFrame.SizeY == frame.SizeY && difference < bestDifference) {
+						best = &twinFrame;
+						bestDifference = difference;
+					}
+				}
+				if (best == nullptr) {
+					LOGW("Frames of {}:{} \"{}/{}\" differ from the ones expected, the spots can't be fixed", anim.Set, anim.Anim, entry.Category, entry.Name);
+					return;
+				}
+				twinFrames.push_back(best);
+			}
+
+			LOGI("Applying \"Yellow Bird\" hotspot fix to {}:{} \"{}/{}\"", anim.Set, anim.Anim, entry.Category, entry.Name);
+			for (std::size_t i = 0; i < anim.Frames.size(); i++) {
+				anim.Frames[i].HotspotX = twinFrames[i]->HotspotX;
+				anim.Frames[i].HotspotY = twinFrames[i]->HotspotY;
+				anim.Frames[i].ColdspotX = twinFrames[i]->ColdspotX;
+				anim.Frames[i].ColdspotY = twinFrames[i]->ColdspotY;
+			}
+			NormalizeAnimation(anim);
+			return;
+		}
+
+		bool hasNoColdspot = std::all_of(anim.Frames.begin(), anim.Frames.end(), [](const AnimFrameSection& frame) {
+			return (frame.ColdspotX == 0 && frame.ColdspotY == 0);
+		});
+		if (!hasNoColdspot) {
+			return;
+		}
+
+		// The animations without a coldspot (flying, charging, hurt, dying, feathers) have their hotspot up to 14 pixels off
+		// from the green bird's, whose animations are the same pictures in the same order. The frames of the same size give
+		// the shift, the one most of them agree on (some frames are missing or one more on either side), and it moves all
+		// of them, with the coldspot and the gunspot where the green bird has them. Both birds are then drawn alike, and
+		// one resting on the floor stands on it rather than in it.
+		const AnimSection* green = findAnimation([&anim](const AnimSection& other, const AnimSetMapping::Entry& otherEntry) {
+			return (other.Anim == anim.Anim && otherEntry.Category == "Birdy"_s);
+		});
+		if (green == nullptr) {
+			return;
+		}
+
+		struct Shift {
+			std::int32_t X, Y;
+			std::int32_t Count;
+			const AnimFrameSection* Reference;
+		};
+		SmallVector<Shift, 8> shifts;
+		for (const AnimFrameSection& frame : anim.Frames) {
+			for (const AnimFrameSection& greenFrame : green->Frames) {
+				if (greenFrame.SizeX != frame.SizeX || greenFrame.SizeY != frame.SizeY) {
+					continue;
+				}
+				std::int32_t x = greenFrame.HotspotX - frame.HotspotX;
+				std::int32_t y = greenFrame.HotspotY - frame.HotspotY;
+				auto it = std::find_if(shifts.begin(), shifts.end(), [x, y](const Shift& shift) { return (shift.X == x && shift.Y == y); });
+				if (it != shifts.end()) {
+					it->Count++;
+				} else {
+					shifts.push_back({ x, y, 1, &greenFrame });
+				}
+				break;
+			}
+		}
+		auto shift = std::max_element(shifts.begin(), shifts.end(), [](const Shift& a, const Shift& b) { return (a.Count < b.Count); });
+		if (shift == shifts.end() || shift->Count * 2 < (std::int32_t)anim.Frames.size()) {
+			return;
+		}
+
+		LOGI("Applying \"Yellow Bird\" hotspot fix to {}:{} \"{}/{}\"", anim.Set, anim.Anim, entry.Category, entry.Name);
+		const AnimFrameSection& reference = *shift->Reference;
+		// A spot the green bird doesn't have (0, 0) isn't made up for the yellow one either
+		bool hasColdspot = (reference.ColdspotX != 0 || reference.ColdspotY != 0);
+		bool hasGunspot = (reference.GunspotX != 0 || reference.GunspotY != 0);
+		for (AnimFrameSection& frame : anim.Frames) {
+			frame.HotspotX = (std::int16_t)(frame.HotspotX + shift->X);
+			frame.HotspotY = (std::int16_t)(frame.HotspotY + shift->Y);
+			if (hasColdspot) {
+				frame.ColdspotX = (std::int16_t)(frame.HotspotX + reference.ColdspotX - reference.HotspotX);
+				frame.ColdspotY = (std::int16_t)(frame.HotspotY + reference.ColdspotY - reference.HotspotY);
+			}
+			if (hasGunspot) {
+				frame.GunspotX = (std::int16_t)(frame.HotspotX + reference.GunspotX - reference.HotspotX);
+				frame.GunspotY = (std::int16_t)(frame.HotspotY + reference.GunspotY - reference.HotspotY);
+			}
+		}
+		NormalizeAnimation(anim);
 	}
 
 	void JJ2Anims::ImportAudioSamples(PakWriter& pakWriter, JJ2Version version, SmallVectorImpl<SampleSection>& samples, ConversionProgress progress)

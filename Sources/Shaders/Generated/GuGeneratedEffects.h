@@ -194,37 +194,416 @@ namespace nCine::RHI::GU
 			inline float UniformFloat(EffectContext& ctx, const char* name) { float v = 0.0f; ctx.LoadUniform(name, &v, 1); return v; }
 			inline vec2 UniformVec2(EffectContext& ctx, const char* name) { float v[2] = { 0.0f, 0.0f }; ctx.LoadUniform(name, v, 2); return vec2(v[0], v[1]); }
 			inline vec4 UniformVec4(EffectContext& ctx, const char* name) { float v[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; ctx.LoadUniform(name, v, 4); return vec4(v[0], v[1], v[2], v[3]); }
-			inline void StripPosition(EffectContext& ctx, int i, const vec2& p) { ctx.SetStripVertexPosition(i, p.x, p.y); }
-			inline void StripUv(EffectContext& ctx, int i, const vec2& uv) { ctx.SetStripVertexUv(i, uv.x, uv.y); }
-			inline void StripColor(EffectContext& ctx, int i, const vec4& c) { ctx.SetStripVertexColor(i, c.x, c.y, c.z, c.w); }
+
+			// While strip_clip() is in effect, a strip is kept here and handed to the context only when it's submitted,
+			// cut to the rectangle. Without it, the setters go straight to the context, as they always did.
+			// Every member initialized, so the state is constant-initialized - no guard is checked on each access
+			struct StripVertex { float X, Y, U, V, Q, C[4]; };
+			struct StripState
+			{
+				bool Clipping = false;
+				bool HasQ = false;
+				float Clip[4] = {};
+				StripVertex V[16] = {};
+			};
+			inline StripState& Strip() { static StripState state; return state; }
+			inline void StripReset() { Strip().Clipping = false; Strip().HasQ = false; }
+			inline void StripClip(EffectContext& ctx, const vec4& r)
+			{
+				(void)ctx;
+				StripState& s = Strip();
+				s.Clipping = (r.z > r.x && r.w > r.y);
+				s.Clip[0] = r.x; s.Clip[1] = r.y; s.Clip[2] = r.z; s.Clip[3] = r.w;
+			}
+			inline void StripPosition(EffectContext& ctx, int i, const vec2& p)
+			{
+				StripState& s = Strip();
+				if (!s.Clipping) { ctx.SetStripVertexPosition(i, p.x, p.y); return; }
+				if (unsigned(i) < 16u) { s.V[i].X = p.x; s.V[i].Y = p.y; }
+			}
+			inline void StripUv(EffectContext& ctx, int i, const vec2& uv)
+			{
+				StripState& s = Strip();
+				if (!s.Clipping) { ctx.SetStripVertexUv(i, uv.x, uv.y); return; }
+				if (unsigned(i) < 16u) { s.V[i].U = uv.x; s.V[i].V = uv.y; }
+			}
+			inline void StripColor(EffectContext& ctx, int i, const vec4& c)
+			{
+				StripState& s = Strip();
+				if (!s.Clipping) { ctx.SetStripVertexColor(i, c.x, c.y, c.z, c.w); return; }
+				if (unsigned(i) < 16u) { s.V[i].C[0] = c.x; s.V[i].C[1] = c.y; s.V[i].C[2] = c.z; s.V[i].C[3] = c.w; }
+			}
+			// The texture coordinates of a strip with a q per vertex are interpolated in perspective: as u * q, v * q and
+			// q along the screen, and divided by q at each pixel (see FixedFunctionPass.h)
+			inline void StripQ(EffectContext& ctx, int i, float q)
+			{
+				StripState& s = Strip();
+				if (!s.Clipping) { ctx.SetStripVertexQ(i, q); return; }
+				if (unsigned(i) < 16u) { s.V[i].Q = q; s.HasQ = true; }
+			}
+
+			// A vertex copied member by member - an assignment of the whole struct is a memcpy() call on some compilers (GCC
+			// for the PowerPC), which costs more than the copy itself, and the clipping copies every vertex several times
+			inline void StripCopy(StripVertex& d, const StripVertex& s)
+			{
+				d.X = s.X; d.Y = s.Y; d.U = s.U; d.V = s.V; d.Q = s.Q;
+				d.C[0] = s.C[0]; d.C[1] = s.C[1]; d.C[2] = s.C[2]; d.C[3] = s.C[3];
+			}
+			// A point of an edge from a to b, t of the way along the screen, made right where it goes (see StripCopy())
+			inline void StripLerp(StripVertex& r, const StripVertex& a, const StripVertex& b, float t, bool hasQ)
+			{
+				r.X = a.X + (b.X - a.X) * t;
+				r.Y = a.Y + (b.Y - a.Y) * t;
+				if (hasQ) {
+					r.Q = a.Q + (b.Q - a.Q) * t;
+					r.U = (a.U * a.Q + (b.U * b.Q - a.U * a.Q) * t) / r.Q;
+					r.V = (a.V * a.Q + (b.V * b.Q - a.V * a.Q) * t) / r.Q;
+				} else {
+					r.Q = 1.0f;
+					r.U = a.U + (b.U - a.U) * t;
+					r.V = a.V + (b.V - a.V) * t;
+				}
+				for (int k = 0; k < 4; k++) {
+					r.C[k] = a.C[k] + (b.C[k] - a.C[k]) * t;
+				}
+			}
+			// Cuts a convex polygon by one side of the rectangle, what is past the bound along the axis goes
+			inline int StripCutPolygon(const StripVertex* in, int n, StripVertex* out, bool alongY, float bound, bool keepAbove, bool hasQ)
+			{
+				int m = 0;
+				for (int i = 0; i < n; i++) {
+					const StripVertex& a = in[i];
+					const StripVertex& b = in[i + 1 < n ? i + 1 : 0];
+					float da = (alongY ? a.Y : a.X) - bound, db = (alongY ? b.Y : b.X) - bound;
+					if (!keepAbove) { da = -da; db = -db; }
+					if (da >= 0.0f) StripCopy(out[m++], a);
+					if ((da >= 0.0f) != (db >= 0.0f)) StripLerp(out[m++], a, b, da / (da - db), hasQ);
+				}
+				return m;
+			}
+			// Whether a vertex of a polygon is past one side of the rectangle - exactly when StripCutPolygon() would drop it
+			inline bool StripPolygonPast(const StripVertex* p, int n, bool alongY, float bound, bool keepAbove)
+			{
+				for (int i = 0; i < n; i++) {
+					float d = (alongY ? p[i].Y : p[i].X) - bound;
+					if (!keepAbove) d = -d;
+					if (!(d >= 0.0f)) return true;
+				}
+				return false;
+			}
+			// Hands vertices to the context and submits them, the vertices in the order they're given
+			inline void StripSend(EffectContext& ctx, const FixedFunctionPass& pass, const StripVertex* p, const int* order, int n, bool hasQ, bool shaded)
+			{
+				for (int j = 0; j < n; j++) {
+					const StripVertex& v = p[order[j]];
+					ctx.SetStripVertexPosition(j, v.X, v.Y);
+					ctx.SetStripVertexUv(j, v.U, v.V);
+					ctx.SetStripVertexColor(j, v.C[0], v.C[1], v.C[2], v.C[3]);
+					if (hasQ) ctx.SetStripVertexQ(j, v.Q);
+				}
+				if (shaded) ctx.SubmitStripShaded(pass, n); else ctx.SubmitStrip(pass, n);
+			}
+			// Cuts a convex polygon to the rectangle and submits what is left, across it from both ends towards the middle
+			inline void StripSendPolygon(EffectContext& ctx, const FixedFunctionPass& pass, const StripVertex* polygon, int n, bool hasQ, bool shaded)
+			{
+				const float* clip = Strip().Clip;
+				// A side no vertex is past would only copy the polygon as it is, so it isn't cut by at all - the pieces of a
+				// perspective rarely reach past more than one side, and every cut copies all the vertices
+				StripVertex a[12], b[12];
+				const StripVertex* p = polygon;
+				StripVertex* next = a;
+				int m = n;
+				if (StripPolygonPast(p, m, false, clip[0], true)) { m = StripCutPolygon(p, m, next, false, clip[0], true, hasQ); p = next; next = (next == a ? b : a); }
+				if (StripPolygonPast(p, m, false, clip[2], false)) { m = StripCutPolygon(p, m, next, false, clip[2], false, hasQ); p = next; next = (next == a ? b : a); }
+				if (StripPolygonPast(p, m, true, clip[1], true)) { m = StripCutPolygon(p, m, next, true, clip[1], true, hasQ); p = next; next = (next == a ? b : a); }
+				if (StripPolygonPast(p, m, true, clip[3], false)) { m = StripCutPolygon(p, m, next, true, clip[3], false, hasQ); p = next; }
+				if (m < 3) return;
+				int order[12];
+				for (int j = 0; j < m; j++) order[j] = (j % 2 == 0 ? j / 2 : m - 1 - j / 2);
+				StripSend(ctx, pass, p, order, m, hasQ, shaded);
+			}
+			inline void StripSubmit(EffectContext& ctx, const FixedFunctionPass& pass, int count, bool shaded)
+			{
+				StripState& s = Strip();
+				const bool hasQ = s.HasQ;
+				s.HasQ = false;
+				count = (count < 16 ? count : 16);
+				if (count < 3) return;
+				const StripVertex* v = s.V;
+				static const int identity[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+				float minX = v[0].X, maxX = v[0].X, minY = v[0].Y, maxY = v[0].Y;
+				for (int i = 1; i < count; i++) {
+					minX = min(minX, v[i].X); maxX = max(maxX, v[i].X); minY = min(minY, v[i].Y); maxY = max(maxY, v[i].Y);
+				}
+				if (maxX <= s.Clip[0] || minX >= s.Clip[2] || maxY <= s.Clip[1] || minY >= s.Clip[3]) return;
+				if (minX >= s.Clip[0] && maxX <= s.Clip[2] && minY >= s.Clip[1] && maxY <= s.Clip[3]) {
+					// Wholly inside, as it is
+					StripSend(ctx, pass, v, identity, count, hasQ, shaded);
+					return;
+				}
+				if (count == 4 && v[0].X == v[1].X && v[2].X == v[3].X && v[0].Y == v[2].Y && v[1].Y == v[3].Y) {
+					// A rectangle stays one, its vertices where they were (a backend may draw such a band row by row): the
+					// vertical edges cut first, then across between them
+					if (v[0].Y == v[1].Y || v[0].X == v[2].X) return;
+					const float y0 = max(min(v[0].Y, v[1].Y), s.Clip[1]), y1 = min(max(v[0].Y, v[1].Y), s.Clip[3]);
+					const float x0 = max(min(v[0].X, v[2].X), s.Clip[0]), x1 = min(max(v[0].X, v[2].X), s.Clip[2]);
+					const float yA = (v[0].Y < v[1].Y ? y0 : y1), yB = (v[0].Y < v[1].Y ? y1 : y0);
+					const float xA = (v[0].X < v[2].X ? x0 : x1), xB = (v[0].X < v[2].X ? x1 : x0);
+					StripVertex edge[4], out[4];
+					StripLerp(edge[0], v[0], v[1], (yA - v[0].Y) / (v[1].Y - v[0].Y), hasQ);
+					StripLerp(edge[1], v[0], v[1], (yB - v[0].Y) / (v[1].Y - v[0].Y), hasQ);
+					StripLerp(edge[2], v[2], v[3], (yA - v[2].Y) / (v[3].Y - v[2].Y), hasQ);
+					StripLerp(edge[3], v[2], v[3], (yB - v[2].Y) / (v[3].Y - v[2].Y), hasQ);
+					StripLerp(out[0], edge[0], edge[2], (xA - edge[0].X) / (edge[2].X - edge[0].X), hasQ);
+					StripLerp(out[1], edge[1], edge[3], (xA - edge[1].X) / (edge[3].X - edge[1].X), hasQ);
+					StripLerp(out[2], edge[0], edge[2], (xB - edge[0].X) / (edge[2].X - edge[0].X), hasQ);
+					StripLerp(out[3], edge[1], edge[3], (xB - edge[1].X) / (edge[3].X - edge[1].X), hasQ);
+					StripSend(ctx, pass, out, identity, 4, hasQ, shaded);
+					return;
+				}
+				// Each pair of the strip's vertices with the next pair is a convex quad, an odd one left at the end is a triangle
+				for (int i = 0; i + 2 < count; i += 2) {
+					if (i + 3 < count) {
+						StripVertex quad[4];
+						StripCopy(quad[0], v[i]); StripCopy(quad[1], v[i + 1]); StripCopy(quad[2], v[i + 3]); StripCopy(quad[3], v[i + 2]);
+						StripSendPolygon(ctx, pass, quad, 4, hasQ, shaded);
+					} else {
+						StripVertex triangle[3];
+						StripCopy(triangle[0], v[i]); StripCopy(triangle[1], v[i + 1]); StripCopy(triangle[2], v[i + 2]);
+						StripSendPolygon(ctx, pass, triangle, 3, hasQ, shaded);
+					}
+				}
+			}
+			inline void SubmitStrip(EffectContext& ctx, const FixedFunctionPass& pass, int count)
+			{
+				if (Strip().Clipping) StripSubmit(ctx, pass, count, false); else ctx.SubmitStrip(pass, count);
+			}
+			inline void SubmitStripShaded(EffectContext& ctx, const FixedFunctionPass& pass, int count)
+			{
+				if (Strip().Clipping) StripSubmit(ctx, pass, count, true); else ctx.SubmitStripShaded(pass, count);
+			}
 		}
 
-		// BatchedShieldFire - from BatchedShieldFire.shader:fixed_function()
-		// Shared by: BatchedShieldFire, ShieldFire [ShieldFire.shader:fixed_function()]
+		// BatchedShieldFire - from BatchedShieldFire.shader:fixed_function(gx, pica, gu, gs)
+		// Shared by: BatchedShieldFire, ShieldFire [ShieldFire.shader:fixed_function(gx, pica, gu, gs)]
 		void BatchedShieldFire_Effect(EffectContext& ctx)
 		{
 			using namespace ff;
+			StripReset();
 			const vec4 COLOR = LoadColor(ctx.Color());
 			float darkness = COLOR.z;
+			float alpha = COLOR.w;
+			vec3 baseColor = vec3(1.0f, 0.3f, 0.0f);
+			vec2 halfX = 0.5f * vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy());
+			vec2 halfY = 0.5f * vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy());
+			vec2 centre = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()) + halfX + halfY;
+			vec4 shift = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+			vec2 noiseScale = vec2(COLOR.x, COLOR.y);
+			vec4 noiseShift = shift - floor(shift) + vec4(0.0f, 2.0f, 0.0f, 2.0f);
+			vec3 glowColor = vec3(1.0f, 0.3f, 0.0f) * darkness;
+			float coreAlpha = 0.55f;
+			float segmentCount = float(3 * 7);
+			float stepCos = cos(6.28318530718f / segmentCount);
+			float stepSin = sin(6.28318530718f / segmentCount);
 			FixedFunctionPass p;
-			Store(p.Color, vec4(0.0f, 0.0f, 0.0f, COLOR.w * 0.5f));
-			Store(p.OffsetColor, vec3(darkness, darkness * 0.45f, darkness * 0.1f));
-			p.HasOffsetColor = true;
-			ctx.SubmitQuad(p);
+			for (int ring = 0; ring < 3; ring++) {
+				vec2 stripDir = vec2(1.0f, 0.0f);
+				vec2 dir = stripDir;
+				for (int s = 0; s < 3; s++) {
+					for (int layer = 0; layer < 3; layer++) {
+						dir = stripDir;
+						for (int j = 0; j <= 7; j++) {
+							for (int e = 0; e < 2; e++) {
+								int boundary = ring + e;
+								float radius = 0.0f;
+								float white = 0.0f;
+								float a = 0.0f;
+								if (boundary == 0) {
+									a = 0.14f;
+								} else {
+									if (boundary == 1) {
+										radius = 0.5f;
+										a = 0.13f;
+									} else {
+										if (boundary == 2) {
+											radius = 0.85f;
+											a = 0.11f;
+										} else {
+											radius = 0.96f;
+											a = 0.09f;
+										}
+									}
+								}
+								vec2 local = radius * dir;
+								StripPosition(ctx, 2 * j + e, centre + local.x * halfX + local.y * halfY);
+								if (layer == 0) {
+									StripColor(ctx, 2 * j + e, vec4(mix(baseColor, vec3(1.0f, 1.0f, 1.0f), white) * darkness, a * alpha));
+								} else {
+									float ty = abs(local.y);
+									float acosY = sqrt(1.0f - ty) * (1.5707288f + ty * (-0.2121144f + ty * (0.074261f - 0.0187293f * ty)));
+									if (local.y < 0.0f) {
+										acosY = 3.14159265f - acosY;
+									}
+									float t = clamp(local.x / sqrt(max(1.0f - local.y * local.y, 0.0001f)), -1.0f, 1.0f);
+									float tx = abs(t);
+									float acosX = sqrt(1.0f - tx) * (1.5707288f + tx * (-0.2121144f + tx * (0.074261f - 0.0187293f * tx)));
+									if (t < 0.0f) {
+										acosX = 3.14159265f - acosX;
+									}
+									vec2 q = vec2(0.5f - acosX * 0.15915494f, acosY * -0.31830989f);
+									vec2 lookupShift = vec2(noiseShift.x, noiseShift.y);
+									if (layer == 2) {
+										lookupShift = vec2(noiseShift.z, noiseShift.w);
+									}
+									StripUv(ctx, 2 * j + e, lookupShift + q * noiseScale);
+								}
+							}
+							if (j < 7) {
+								dir = vec2(dir.x * stepCos - dir.y * stepSin, dir.x * stepSin + dir.y * stepCos);
+							}
+						}
+						if (layer == 0) {
+							SubmitStripShaded(ctx, p, 2 * 7 + 2);
+						} else {
+							float fade = 1.0f;
+							if (ring == 1) {
+								fade = 0.75f;
+							} else {
+								if (ring >= 2) {
+									fade = 0.45f;
+								}
+							}
+							FixedFunctionPass glow;
+							Store(glow.Color, vec4(0.0f, 0.0f, 0.0f, fade * alpha));
+							Store(glow.OffsetColor, glowColor);
+							glow.HasOffsetColor = true;
+							SubmitStrip(ctx, glow, 2 * 7 + 2);
+							FixedFunctionPass core;
+							Store(core.Color, vec4(0.0f, 0.0f, 0.0f, fade * coreAlpha * alpha));
+							Store(core.OffsetColor, vec3(1.0f, 1.0f, 0.9f) * darkness);
+							core.HasOffsetColor = true;
+							SubmitStrip(ctx, core, 2 * 7 + 2);
+						}
+					}
+					stripDir = dir;
+				}
+			}
 		}
 
-		// BatchedShieldLightning - from BatchedShieldLightning.shader:fixed_function()
-		// Shared by: BatchedShieldLightning, ShieldLightning [ShieldLightning.shader:fixed_function()]
+		// BatchedShieldLightning - from BatchedShieldLightning.shader:fixed_function(gx, pica, gu, gs)
+		// Shared by: BatchedShieldLightning, ShieldLightning [ShieldLightning.shader:fixed_function(gx, pica, gu, gs)]
 		void BatchedShieldLightning_Effect(EffectContext& ctx)
 		{
 			using namespace ff;
+			StripReset();
 			const vec4 COLOR = LoadColor(ctx.Color());
 			float darkness = COLOR.z;
+			float alpha = COLOR.w;
+			vec3 baseColor = vec3(0.1f, 1.0f, 0.0f);
+			vec2 halfX = 0.5f * vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy());
+			vec2 halfY = 0.5f * vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy());
+			vec2 centre = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()) + halfX + halfY;
+			vec4 shift = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+			vec2 noiseScale = vec2(COLOR.x, COLOR.y);
+			vec4 noiseShift = shift - floor(shift) + vec4(0.0f, 2.0f, 0.0f, 2.0f);
+			vec3 glowColor = vec3(0.2f, 1.0f, 0.1f) * darkness;
+			float coreAlpha = 0.43f;
+			float segmentCount = float(3 * 7);
+			float stepCos = cos(6.28318530718f / segmentCount);
+			float stepSin = sin(6.28318530718f / segmentCount);
 			FixedFunctionPass p;
-			Store(p.Color, vec4(0.0f, 0.0f, 0.0f, COLOR.w * 0.5f));
-			Store(p.OffsetColor, vec3(darkness * 0.6f, darkness * 0.8f, darkness));
-			p.HasOffsetColor = true;
-			ctx.SubmitQuad(p);
+			for (int ring = 0; ring < 4; ring++) {
+				vec2 stripDir = vec2(1.0f, 0.0f);
+				vec2 dir = stripDir;
+				for (int s = 0; s < 3; s++) {
+					for (int layer = 0; layer < 2; layer++) {
+						dir = stripDir;
+						for (int j = 0; j <= 7; j++) {
+							for (int e = 0; e < 2; e++) {
+								int boundary = ring + e;
+								float radius = 0.0f;
+								float white = 0.0f;
+								float a = 0.0f;
+								if (boundary == 0) {
+									white = 0.1f;
+									a = 0.1f;
+								} else {
+									if (boundary == 1) {
+										radius = 0.5f;
+										white = 0.1f;
+										a = 0.1f;
+									} else {
+										if (boundary == 2) {
+											radius = 0.88f;
+											white = 0.15f;
+											a = 0.11f;
+										} else {
+											if (boundary == 3) {
+												radius = 0.935f;
+												white = 1.0f;
+												a = 0.54f;
+											} else {
+												radius = 0.96f;
+												white = 1.0f;
+												a = 0.35f;
+											}
+										}
+									}
+								}
+								vec2 local = radius * dir;
+								StripPosition(ctx, 2 * j + e, centre + local.x * halfX + local.y * halfY);
+								if (layer == 0) {
+									StripColor(ctx, 2 * j + e, vec4(mix(baseColor, vec3(1.0f, 1.0f, 1.0f), white) * darkness, a * alpha));
+								} else {
+									float ty = abs(local.y);
+									float acosY = sqrt(1.0f - ty) * (1.5707288f + ty * (-0.2121144f + ty * (0.074261f - 0.0187293f * ty)));
+									if (local.y < 0.0f) {
+										acosY = 3.14159265f - acosY;
+									}
+									float t = clamp(local.x / sqrt(max(1.0f - local.y * local.y, 0.0001f)), -1.0f, 1.0f);
+									float tx = abs(t);
+									float acosX = sqrt(1.0f - tx) * (1.5707288f + tx * (-0.2121144f + tx * (0.074261f - 0.0187293f * tx)));
+									if (t < 0.0f) {
+										acosX = 3.14159265f - acosX;
+									}
+									vec2 q = vec2(0.5f - acosX * 0.15915494f, acosY * -0.31830989f);
+									vec2 lookupShift = vec2(noiseShift.x, noiseShift.y);
+									if (layer == 2) {
+										lookupShift = vec2(noiseShift.z, noiseShift.w);
+									}
+									StripUv(ctx, 2 * j + e, lookupShift + q * noiseScale);
+								}
+							}
+							if (j < 7) {
+								dir = vec2(dir.x * stepCos - dir.y * stepSin, dir.x * stepSin + dir.y * stepCos);
+							}
+						}
+						if (layer == 0) {
+							SubmitStripShaded(ctx, p, 2 * 7 + 2);
+						} else {
+							float fade = 1.0f;
+							if (ring == 1) {
+								fade = 0.75f;
+							} else {
+								if (ring >= 2) {
+									fade = 0.45f;
+								}
+							}
+							FixedFunctionPass glow;
+							Store(glow.Color, vec4(0.0f, 0.0f, 0.0f, fade * alpha));
+							Store(glow.OffsetColor, glowColor);
+							glow.HasOffsetColor = true;
+							SubmitStrip(ctx, glow, 2 * 7 + 2);
+							FixedFunctionPass core;
+							Store(core.Color, vec4(0.0f, 0.0f, 0.0f, fade * coreAlpha * alpha));
+							Store(core.OffsetColor, vec3(1.0f, 1.0f, 0.9f) * darkness);
+							core.HasOffsetColor = true;
+							SubmitStrip(ctx, core, 2 * 7 + 2);
+						}
+					}
+					stripDir = dir;
+				}
+			}
 		}
 
 		// Colorized - from Colorized.shader:fixed_function(pvr, gu, gs)
@@ -251,6 +630,7 @@ namespace nCine::RHI::GU
 		void CombineWithWater_Effect(EffectContext& ctx)
 		{
 			using namespace ff;
+			StripReset();
 			if (ctx.HasUniform("uWaterLevel")) {
 				vec2 origin = vec2(ctx.QuadOriginX(), ctx.QuadOriginY());
 				float viewW = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy()).x;
@@ -286,7 +666,7 @@ namespace nCine::RHI::GU
 					StripColor(ctx, 1, above);
 					StripColor(ctx, 2, above);
 					StripColor(ctx, 3, above);
-					ctx.SubmitStripShaded(p, 4);
+					SubmitStripShaded(ctx, p, 4);
 					if (wavy) {
 						for (int s = 0; s < 4; s++) {
 							for (int j = 0; j <= 7; j++) {
@@ -301,7 +681,7 @@ namespace nCine::RHI::GU
 								StripColor(ctx, 2 * j, above);
 								StripColor(ctx, 2 * j + 1, above);
 							}
-							ctx.SubmitStripShaded(p, 2 * 7 + 2);
+							SubmitStripShaded(ctx, p, 2 * 7 + 2);
 						}
 					}
 				}
@@ -345,7 +725,7 @@ namespace nCine::RHI::GU
 								StripColor(ctx, 2 * j, c0);
 								StripColor(ctx, 2 * j + 1, c1);
 							}
-							ctx.SubmitStripShaded(p, 2 * 7 + 2);
+							SubmitStripShaded(ctx, p, 2 * 7 + 2);
 						}
 					}
 					StripPosition(ctx, 0, vec2(leftX, y1));
@@ -364,7 +744,7 @@ namespace nCine::RHI::GU
 					StripColor(ctx, 5, c3);
 					StripColor(ctx, 6, c4);
 					StripColor(ctx, 7, c4);
-					ctx.SubmitStripShaded(p, 8);
+					SubmitStripShaded(ctx, p, 8);
 					float rayEnd = topY + viewH * (1.0f / 1.4f);
 					float fadeIn = viewH * 0.06f;
 					float yA = max(waterY, topY);
@@ -418,7 +798,7 @@ namespace nCine::RHI::GU
 									StripColor(ctx, 3, vec4(1.0f, 1.0f, 1.0f, intensity * envelopeB));
 									StripColor(ctx, 4, edge);
 									StripColor(ctx, 5, edge);
-									ctx.SubmitStripShaded(p, 6);
+									SubmitStripShaded(ctx, p, 6);
 								}
 								StripPosition(ctx, 0, vec2(xB - wB, yB));
 								StripPosition(ctx, 1, vec2(xC - wC, rayEnd));
@@ -432,7 +812,7 @@ namespace nCine::RHI::GU
 								StripColor(ctx, 3, edge);
 								StripColor(ctx, 4, edge);
 								StripColor(ctx, 5, edge);
-								ctx.SubmitStripShaded(p, 6);
+								SubmitStripShaded(ctx, p, 6);
 							}
 						}
 					}
@@ -507,11 +887,25 @@ namespace nCine::RHI::GU
 			ctx.SubmitQuad(p);
 		}
 
+		// SingleColor - from SingleColor.shader:fixed_function()
+		// Shared by: SingleColor, SingleColor (USE_PALETTE), BatchedSingleColor, BatchedSingleColor (USE_PALETTE), WhiteMask [WhiteMask.shader:fixed_function()], WhiteMask (USE_PALETTE) [WhiteMask.shader:fixed_function()], BatchedWhiteMask [WhiteMask.shader:fixed_function()], BatchedWhiteMask (USE_PALETTE) [WhiteMask.shader:fixed_function()]
+		void SingleColor_Effect(EffectContext& ctx)
+		{
+			using namespace ff;
+			const vec4 COLOR = LoadColor(ctx.Color());
+			FixedFunctionPass p;
+			Store(p.Color, vec4(0.0f, 0.0f, 0.0f, COLOR.w));
+			Store(p.OffsetColor, COLOR.xyz());
+			p.HasOffsetColor = true;
+			ctx.SubmitQuad(p);
+		}
+
 		// TexturedBackground - from TexturedBackground.shader:fixed_function(gu)
-		// Shared by: TexturedBackground, TexturedBackground (DITHER), TexturedBackgroundCircle [TexturedBackgroundCircle.shader:fixed_function(gu)], TexturedBackgroundCircle (DITHER) [TexturedBackgroundCircle.shader:fixed_function(gu)]
+		// Shared by: TexturedBackground, TexturedBackground (DITHER), TexturedBackground (KEYED), TexturedBackgroundTunnel [TexturedBackgroundTunnel.shader:fixed_function(gu)], TexturedBackgroundTunnel (DITHER) [TexturedBackgroundTunnel.shader:fixed_function(gu)], TexturedBackgroundTunnel (KEYED) [TexturedBackgroundTunnel.shader:fixed_function(gu)]
 		void TexturedBackground_Effect(EffectContext& ctx)
 		{
 			using namespace ff;
+			StripReset();
 			if (!ctx.HasUniform("uViewSize") || !ctx.HasUniform("uShift") || !ctx.HasUniform("uHorizonColor")) {
 				FixedFunctionPass fallback;
 				ctx.SubmitQuad(fallback);
@@ -519,84 +913,668 @@ namespace nCine::RHI::GU
 				vec2 viewSize = UniformVec2(ctx, "uViewSize");
 				vec2 shift = UniformVec2(ctx, "uShift");
 				vec4 horizon = UniformVec4(ctx, "uHorizonColor");
-				float correction = viewSize.y > 0.0f ? viewSize.x * 9.0f / (viewSize.y * 16.0f) : 1.0f;
-				float shiftU = shift.x / 256.0f;
-				float shiftV = shift.y / 256.0f;
 				float leftX = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).x;
 				float spanX = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy()).x;
 				float topY = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).y;
 				float spanY = vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy()).y;
+				vec4 texRect = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+				bool partial = texRect.x > 0.0f && texRect.z > 0.0f && (texRect.x < 0.9999f || texRect.z < 0.9999f || abs(texRect.y) > 0.0001f || abs(texRect.w) > 0.0001f);
+				if (partial) {
+					StripClip(ctx, vec4(min(leftX, leftX + spanX), min(topY, topY + spanY), max(leftX, leftX + spanX), max(topY, topY + spanY)));
+					spanX = spanX / texRect.x;
+					spanY = spanY / texRect.z;
+					leftX = leftX - texRect.y * spanX;
+					topY = topY - texRect.w * spanY;
+				}
 				FixedFunctionPass warp;
 				FixedFunctionPass horizonPass;
 				horizonPass.Blend = FixedFunctionPass::BlendMode::Alpha;
 				int stageCount = 2;
-				for (int stage = 0; stage < stageCount; stage++) {
-					for (int topHalf = 0; topHalf < 2; topHalf++) {
-						float yShift = float(topHalf);
-						for (int band = 0; band < 16; band++) {
-							float t0 = (float(topHalf) + float(band) / 16.0f) * 0.5f;
-							float t1 = (float(topHalf) + float(band + 1) / 16.0f) * 0.5f;
-							float split = -1.0f;
-							float vStart = shiftV + (t0 - yShift) * 1.4f * (1.3f - abs(2.0f * t0 - 1.0f));
-							float vEnd = shiftV + (t1 - yShift) * 1.4f * (1.3f - abs(2.0f * t1 - 1.0f));
-							if (floor(vStart) != floor(vEnd)) {
-								float boundary = floor(vEnd);
-								float lo = t0;
-								float hi = t1;
-								for (int i = 0; i < 12; i++) {
-									float mid = 0.5f * (lo + hi);
-									if (shiftV + (mid - yShift) * 1.4f * (1.3f - abs(2.0f * mid - 1.0f)) < boundary) {
-										lo = mid;
-									} else {
-										hi = mid;
+				{
+					float correction = viewSize.y > 0.0f ? viewSize.x * 9.0f / (viewSize.y * 16.0f) : 1.0f;
+					float shiftU = shift.x / 256.0f;
+					float shiftV = shift.y / 256.0f;
+					for (int stage = 0; stage < stageCount; stage++) {
+						for (int topHalf = 0; topHalf < 2; topHalf++) {
+							float yShift = float(topHalf);
+							for (int band = 0; band < 16; band++) {
+								float t0 = (float(topHalf) + float(band) / 16.0f) * 0.5f;
+								float t1 = (float(topHalf) + float(band + 1) / 16.0f) * 0.5f;
+								float split = -1.0f;
+								float vStart = shiftV + (t0 - yShift) * 1.4f * (1.3f - abs(2.0f * t0 - 1.0f));
+								float vEnd = shiftV + (t1 - yShift) * 1.4f * (1.3f - abs(2.0f * t1 - 1.0f));
+								if (floor(vStart) != floor(vEnd)) {
+									float boundary = floor(vEnd);
+									float lo = t0;
+									float hi = t1;
+									for (int i = 0; i < 12; i++) {
+										float mid = 0.5f * (lo + hi);
+										if (shiftV + (mid - yShift) * 1.4f * (1.3f - abs(2.0f * mid - 1.0f)) < boundary) {
+											lo = mid;
+										} else {
+											hi = mid;
+										}
 									}
+									split = 0.5f * (lo + hi);
 								}
-								split = 0.5f * (lo + hi);
-							}
-							for (int part = 0; part < 2; part++) {
-								float bandT0 = part == 0 ? t0 : split;
-								float bandT1 = part == 0 ? (split > 0.0f ? split : t1) : t1;
-								if (!(part == 1 && split <= 0.0f || bandT1 <= bandT0)) {
-									float y0 = topY + spanY * bandT0;
-									float y1 = topY + spanY * bandT1;
-									float d0 = 1.3f - abs(2.0f * bandT0 - 1.0f);
-									float d1 = 1.3f - abs(2.0f * bandT1 - 1.0f);
-									if (stage == 0) {
-										float v0 = shiftV + (bandT0 - yShift) * 1.4f * d0;
-										float v1 = shiftV + (bandT1 - yShift) * 1.4f * d1;
-										float vBase = floor(0.5f * (v0 + v1));
-										v0 -= vBase;
-										v1 -= vBase;
-										float halfSpan0 = 0.5f * (0.5f + 1.5f * d0) * correction;
-										float halfSpan1 = 0.5f * (0.5f + 1.5f * d1) * correction;
-										float uLeft0 = shiftU - halfSpan0;
-										float uRight0 = shiftU + halfSpan0;
-										float uLeft1 = shiftU - halfSpan1;
-										float uRight1 = shiftU + halfSpan1;
-										float uBase = floor(shiftU);
-										StripPosition(ctx, 0, vec2(leftX + spanX, y0));
-										StripPosition(ctx, 1, vec2(leftX + spanX, y1));
-										StripPosition(ctx, 2, vec2(leftX, y0));
-										StripPosition(ctx, 3, vec2(leftX, y1));
-										StripUv(ctx, 0, vec2(uRight0 - uBase, v0));
-										StripUv(ctx, 1, vec2(uRight1 - uBase, v1));
-										StripUv(ctx, 2, vec2(uLeft0 - uBase, v0));
-										StripUv(ctx, 3, vec2(uLeft1 - uBase, v1));
-										ctx.SubmitStrip(warp, 4);
-									}
-									if (stage == 1) {
-										float alpha0 = clamp(d0 * d0 - 0.3f, 0.0f, 1.0f);
-										float alpha1 = clamp(d1 * d1 - 0.3f, 0.0f, 1.0f);
-										if (alpha0 > 0.0f || alpha1 > 0.0f) {
+								for (int part = 0; part < 2; part++) {
+									float bandT0 = part == 0 ? t0 : split;
+									float bandT1 = part == 0 ? (split > 0.0f ? split : t1) : t1;
+									if (!(part == 1 && split <= 0.0f || bandT1 <= bandT0)) {
+										float y0 = topY + spanY * bandT0;
+										float y1 = topY + spanY * bandT1;
+										float d0 = 1.3f - abs(2.0f * bandT0 - 1.0f);
+										float d1 = 1.3f - abs(2.0f * bandT1 - 1.0f);
+										if (stage == 0) {
+											float v0 = shiftV + (bandT0 - yShift) * 1.4f * d0;
+											float v1 = shiftV + (bandT1 - yShift) * 1.4f * d1;
+											float vBase = floor(0.5f * (v0 + v1));
+											v0 -= vBase;
+											v1 -= vBase;
+											float halfSpan0 = 0.5f * (0.5f + 1.5f * d0) * correction;
+											float halfSpan1 = 0.5f * (0.5f + 1.5f * d1) * correction;
+											float uLeft0 = shiftU - halfSpan0;
+											float uRight0 = shiftU + halfSpan0;
+											float uLeft1 = shiftU - halfSpan1;
+											float uRight1 = shiftU + halfSpan1;
+											float uBase = floor(shiftU);
 											StripPosition(ctx, 0, vec2(leftX + spanX, y0));
 											StripPosition(ctx, 1, vec2(leftX + spanX, y1));
 											StripPosition(ctx, 2, vec2(leftX, y0));
 											StripPosition(ctx, 3, vec2(leftX, y1));
-											StripColor(ctx, 0, vec4(horizon.xyz(), alpha0));
-											StripColor(ctx, 1, vec4(horizon.xyz(), alpha1));
-											StripColor(ctx, 2, vec4(horizon.xyz(), alpha0));
-											StripColor(ctx, 3, vec4(horizon.xyz(), alpha1));
-											ctx.SubmitStripShaded(horizonPass, 4);
+											StripUv(ctx, 0, vec2(uRight0 - uBase, v0));
+											StripUv(ctx, 1, vec2(uRight1 - uBase, v1));
+											StripUv(ctx, 2, vec2(uLeft0 - uBase, v0));
+											StripUv(ctx, 3, vec2(uLeft1 - uBase, v1));
+											SubmitStrip(ctx, warp, 4);
+										}
+										if (stage == 1) {
+											float alpha0 = clamp(d0 * d0 - 0.3f, 0.0f, 1.0f);
+											float alpha1 = clamp(d1 * d1 - 0.3f, 0.0f, 1.0f);
+											if (alpha0 > 0.0f || alpha1 > 0.0f) {
+												StripPosition(ctx, 0, vec2(leftX + spanX, y0));
+												StripPosition(ctx, 1, vec2(leftX + spanX, y1));
+												StripPosition(ctx, 2, vec2(leftX, y0));
+												StripPosition(ctx, 3, vec2(leftX, y1));
+												StripColor(ctx, 0, vec4(horizon.xyz(), alpha0));
+												StripColor(ctx, 1, vec4(horizon.xyz(), alpha1));
+												StripColor(ctx, 2, vec4(horizon.xyz(), alpha0));
+												StripColor(ctx, 3, vec4(horizon.xyz(), alpha1));
+												SubmitStripShaded(ctx, horizonPass, 4);
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// TexturedBackground (PLUS) - from TexturedBackground.shader:fixed_function(gu)
+		// Shared by: TexturedBackground (PLUS), TexturedBackground (PLUS_DITHER), TexturedBackground (PLUS_KEYED)
+		void TexturedBackground_PLUS_Effect(EffectContext& ctx)
+		{
+			using namespace ff;
+			StripReset();
+			if (!ctx.HasUniform("uViewSize") || !ctx.HasUniform("uShift") || !ctx.HasUniform("uHorizonColor")) {
+				FixedFunctionPass fallback;
+				ctx.SubmitQuad(fallback);
+			} else {
+				vec2 viewSize = UniformVec2(ctx, "uViewSize");
+				vec2 shift = UniformVec2(ctx, "uShift");
+				vec4 horizon = UniformVec4(ctx, "uHorizonColor");
+				float leftX = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).x;
+				float spanX = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy()).x;
+				float topY = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).y;
+				float spanY = vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy()).y;
+				vec4 texRect = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+				bool partial = texRect.x > 0.0f && texRect.z > 0.0f && (texRect.x < 0.9999f || texRect.z < 0.9999f || abs(texRect.y) > 0.0001f || abs(texRect.w) > 0.0001f);
+				if (partial) {
+					StripClip(ctx, vec4(min(leftX, leftX + spanX), min(topY, topY + spanY), max(leftX, leftX + spanX), max(topY, topY + spanY)));
+					spanX = spanX / texRect.x;
+					spanY = spanY / texRect.z;
+					leftX = leftX - texRect.y * spanX;
+					topY = topY - texRect.w * spanY;
+				}
+				float viewW = max(viewSize.x, 1.0f);
+				float viewH = max(viewSize.y, 1.0f);
+				float visLeft = partial ? texRect.y * viewW : 0.0f;
+				float visRight = partial ? (texRect.y + texRect.x) * viewW : viewW;
+				float visTop = partial ? texRect.w * viewH : 0.0f;
+				float visBottom = partial ? (texRect.w + texRect.z) * viewH : viewH;
+				float scaleX = spanX / viewW;
+				float scaleY = spanY / viewH;
+				FixedFunctionPass warp;
+				FixedFunctionPass horizonPass;
+				horizonPass.Blend = FixedFunctionPass::BlendMode::Alpha;
+				int stageCount = 2;
+				{
+					float screenLeft = leftX + visLeft * scaleX;
+					float screenRight = leftX + visRight * scaleX;
+					bool isCylinder = false;
+					vec4 cylinder = vec4(0.5f, 0.5f, 1.0f, 0.0f);
+					if (isCylinder) {
+						cylinder = UniformVec4(ctx, "uCylinder");
+					}
+					vec4 offsets = vec4(0.0f, 0.0f, 0.0f, 0.0f);
+					if (ctx.HasUniform("uHorizonOffset")) {
+						offsets = UniformVec4(ctx, "uHorizonOffset");
+					}
+					float centerX = (isCylinder ? cylinder.x : 0.5f + offsets.x) * viewW;
+					float horizonRow = floor((isCylinder ? cylinder.y : 0.5f + offsets.y) * viewH);
+					float fadeOn = isCylinder ? (cylinder.z > 0.5f ? 0.65f : 0.0f) : 1.0f - offsets.z;
+					float halfSize = isCylinder && cylinder.w > 0.5f ? 1.0f : 0.0f;
+					float warpC = 1.0f - (shift.y + 128.0f) / 256.0f;
+					float cylinderC = 1.0f - (shift.y + 128.0f + 128.0f * halfSize) / 256.0f;
+					float cylinderRate = (1.0f + halfSize) / viewH;
+					float flatDistance = !isCylinder && fadeOn > 0.5f ? 8.0f + 141.0f * 0.141421f : 0.0f;
+					float screenSpan = screenRight - screenLeft;
+					for (int stage = 0; stage < stageCount; stage++) {
+						float flatTop = max(horizonRow + 8.5f - flatDistance, visTop);
+						float flatBottom = min(horizonRow + flatDistance - 7.5f, visBottom);
+						if (flatBottom > flatTop && stage == stageCount - 1) {
+							StripPosition(ctx, 0, vec2(screenRight, topY + flatTop * scaleY));
+							StripPosition(ctx, 1, vec2(screenRight, topY + flatBottom * scaleY));
+							StripPosition(ctx, 2, vec2(screenLeft, topY + flatTop * scaleY));
+							StripPosition(ctx, 3, vec2(screenLeft, topY + flatBottom * scaleY));
+							StripUv(ctx, 0, vec2(0.0f, 0.0f));
+							StripUv(ctx, 1, vec2(0.0f, 0.0f));
+							StripUv(ctx, 2, vec2(0.0f, 0.0f));
+							StripUv(ctx, 3, vec2(0.0f, 0.0f));
+							StripColor(ctx, 0, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 1, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 2, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 3, vec4(horizon.xyz(), 1.0f));
+							SubmitStripShaded(ctx, horizonPass, 4);
+						}
+						for (int halfIndex = 0; halfIndex < 2; halfIndex++) {
+							float sigma = halfIndex == 0 ? 1.0f : -1.0f;
+							float dNear = halfIndex == 0 ? max(horizonRow + 0.5f, visTop) - horizonRow + 7.5f : horizonRow + 8.5f - min(horizonRow + 0.5f, visBottom);
+							float dFar = halfIndex == 0 ? visBottom - horizonRow + 7.5f : horizonRow + 8.5f - visTop;
+							float rowFrom = max(0.5f * viewH * float(halfIndex), visTop);
+							float rowTo = min(0.5f * viewH * float(halfIndex + 1), visBottom);
+							bool rising = !isCylinder && halfIndex == 1;
+							float bandRatio = sqrt(sqrt(sqrt(sqrt(max(dFar, 8.0f) / max(dNear, 8.0f)))));
+							if (16 > 16) {
+								bandRatio = sqrt(bandRatio);
+							}
+							float bandDistance = dNear;
+							if (isCylinder ? rowTo > rowFrom : dFar > dNear) {
+								for (int band = 0; band < 16; band++) {
+									float fa = float(band) / float(16);
+									float fb = float(band + 1) / float(16);
+									float pBandA = isCylinder ? rowFrom + (rowTo - rowFrom) * fa : bandDistance;
+									float pBandB = isCylinder ? rowFrom + (rowTo - rowFrom) * fb : band == 16 - 1 ? dFar : bandDistance * bandRatio;
+									bandDistance = pBandB;
+									pBandA = max(pBandA, flatDistance);
+									float tvBandA = isCylinder ? cylinderC - (pBandA - 0.5f - 0.5f * viewH) * cylinderRate : warpC + sigma * 60.0f / pBandA;
+									float tvBandB = isCylinder ? cylinderC - (pBandB - 0.5f - 0.5f * viewH) * cylinderRate : warpC + sigma * 60.0f / pBandB;
+									int crossings = int(abs(floor(tvBandB) - floor(tvBandA)));
+									for (int part = 0; part < 4; part++) {
+										float boundaryStart = rising ? floor(tvBandA) + float(part) : floor(tvBandA) - float(part - 1);
+										float boundaryEnd = rising ? floor(tvBandA) + 1.0f + float(part) : floor(tvBandA) - float(part);
+										bool lastPart = part >= crossings || part == 3;
+										float pA = pBandA;
+										float pB = pBandB;
+										if (isCylinder) {
+											if (part > 0) {
+												pA = 0.5f + 0.5f * viewH + (cylinderC - boundaryStart) / cylinderRate;
+											}
+											if (!lastPart) {
+												pB = 0.5f + 0.5f * viewH + (cylinderC - boundaryEnd) / cylinderRate;
+											}
+										} else {
+											if (part > 0) {
+												pA = 60.0f / (sigma * (boundaryStart - warpC));
+											}
+											if (!lastPart) {
+												pB = 60.0f / (sigma * (boundaryEnd - warpC));
+											}
+										}
+										if (part <= crossings && pB > pA && pBandB > pBandA) {
+											float sA = pA;
+											float sB = pB;
+											float tvA = 0.0f;
+											float tvB = 0.0f;
+											float slopeA = 0.0f;
+											float slopeB = 0.0f;
+											float uCenter = 0.0f;
+											float fromA = 0.0f;
+											float fromB = 0.0f;
+											if (isCylinder) {
+												float cosA = cos(3.14159265f * (pA - 0.5f - horizonRow) / viewH);
+												float cosB = cos(3.14159265f * (pB - 0.5f - horizonRow) / viewH);
+												slopeA = (halfSize > 0.5f ? 256.0f * (1.0f + 2.0f * cosA) : 128.0f * (2.0f + cosA)) / viewW;
+												slopeB = (halfSize > 0.5f ? 256.0f * (1.0f + 2.0f * cosB) : 128.0f * (2.0f + cosB)) / viewW;
+												tvA = cylinderC - (pA - 0.5f - 0.5f * viewH) * cylinderRate;
+												tvB = cylinderC - (pB - 0.5f - 0.5f * viewH) * cylinderRate;
+												uCenter = shift.x * 0.25f;
+												fromA = (pA - 0.5f - horizonRow) / 141.0f;
+												fromB = (pB - 0.5f - horizonRow) / 141.0f;
+											} else {
+												sA = halfIndex == 0 ? pA + horizonRow - 7.5f : horizonRow + 8.5f - pA;
+												sB = halfIndex == 0 ? pB + horizonRow - 7.5f : horizonRow + 8.5f - pB;
+												slopeA = 60.0f / pA;
+												slopeB = 60.0f / pB;
+												tvA = warpC + sigma * slopeA;
+												tvB = warpC + sigma * slopeB;
+												uCenter = shift.x;
+												fromA = (pA - 8.0f) / 141.0f;
+												fromB = (pB - 8.0f) / 141.0f;
+											}
+											float tintA = fadeOn * clamp(1.0f - fromA * fromA, 0.0f, 1.0f);
+											float tintB = fadeOn * clamp(1.0f - fromB * fromB, 0.0f, 1.0f);
+											bool swap = sA > sB;
+											float y0 = topY + spanY * (swap ? sB : sA) / viewH;
+											float y1 = topY + spanY * (swap ? sA : sB) / viewH;
+											float slope0 = swap ? slopeB : slopeA;
+											float slope1 = swap ? slopeA : slopeB;
+											float tv0 = swap ? tvB : tvA;
+											float tv1 = swap ? tvA : tvB;
+											float tint0 = swap ? tintB : tintA;
+											float tint1 = swap ? tintA : tintB;
+											float uLeft0 = (uCenter + (visLeft - 0.5f - centerX) * slope0) / 256.0f;
+											float uRight0 = (uCenter + (visRight - 0.5f - centerX) * slope0) / 256.0f;
+											float uLeft1 = (uCenter + (visLeft - 0.5f - centerX) * slope1) / 256.0f;
+											float uRight1 = (uCenter + (visRight - 0.5f - centerX) * slope1) / 256.0f;
+											if (stage == 0) {
+												float vBase = floor(0.5f * (tv0 + tv1));
+												float v0 = tv0 - vBase;
+												float v1 = tv1 - vBase;
+												float uBase = floor(min(uLeft0, uLeft1));
+												for (int column = 0; column <= 2; column++) {
+													float across = float(column) / float(2);
+													StripPosition(ctx, 2 * column, vec2(screenLeft + across * screenSpan, y0));
+													StripPosition(ctx, 2 * column + 1, vec2(screenLeft + across * screenSpan, y1));
+													StripUv(ctx, 2 * column, vec2(uLeft0 + across * (uRight0 - uLeft0) - uBase, v0));
+													StripUv(ctx, 2 * column + 1, vec2(uLeft1 + across * (uRight1 - uLeft1) - uBase, v1));
+													StripColor(ctx, 2 * column, vec4(horizon.xyz(), tint0));
+													StripColor(ctx, 2 * column + 1, vec4(horizon.xyz(), tint1));
+												}
+												SubmitStrip(ctx, warp, 2 * (2 + 1));
+											}
+											if (stage == 1 && (tint0 > 0.0f || tint1 > 0.0f)) {
+												StripPosition(ctx, 0, vec2(screenRight, y0));
+												StripPosition(ctx, 1, vec2(screenRight, y1));
+												StripPosition(ctx, 2, vec2(screenLeft, y0));
+												StripPosition(ctx, 3, vec2(screenLeft, y1));
+												StripColor(ctx, 0, vec4(horizon.xyz(), tint0));
+												StripColor(ctx, 1, vec4(horizon.xyz(), tint1));
+												StripColor(ctx, 2, vec4(horizon.xyz(), tint0));
+												StripColor(ctx, 3, vec4(horizon.xyz(), tint1));
+												SubmitStripShaded(ctx, horizonPass, 4);
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// TexturedBackgroundCylinder - from TexturedBackgroundCylinder.shader:fixed_function(gu)
+		// Shared by: TexturedBackgroundCylinder, TexturedBackgroundCylinder (DITHER), TexturedBackgroundCylinder (KEYED)
+		void TexturedBackgroundCylinder_Effect(EffectContext& ctx)
+		{
+			using namespace ff;
+			StripReset();
+			if (!ctx.HasUniform("uViewSize") || !ctx.HasUniform("uShift") || !ctx.HasUniform("uHorizonColor")) {
+				FixedFunctionPass fallback;
+				ctx.SubmitQuad(fallback);
+			} else {
+				vec2 viewSize = UniformVec2(ctx, "uViewSize");
+				vec2 shift = UniformVec2(ctx, "uShift");
+				vec4 horizon = UniformVec4(ctx, "uHorizonColor");
+				float leftX = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).x;
+				float spanX = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy()).x;
+				float topY = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).y;
+				float spanY = vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy()).y;
+				vec4 texRect = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+				bool partial = texRect.x > 0.0f && texRect.z > 0.0f && (texRect.x < 0.9999f || texRect.z < 0.9999f || abs(texRect.y) > 0.0001f || abs(texRect.w) > 0.0001f);
+				if (partial) {
+					StripClip(ctx, vec4(min(leftX, leftX + spanX), min(topY, topY + spanY), max(leftX, leftX + spanX), max(topY, topY + spanY)));
+					spanX = spanX / texRect.x;
+					spanY = spanY / texRect.z;
+					leftX = leftX - texRect.y * spanX;
+					topY = topY - texRect.w * spanY;
+				}
+				float viewW = max(viewSize.x, 1.0f);
+				float viewH = max(viewSize.y, 1.0f);
+				float visLeft = partial ? texRect.y * viewW : 0.0f;
+				float visRight = partial ? (texRect.y + texRect.x) * viewW : viewW;
+				float visTop = partial ? texRect.w * viewH : 0.0f;
+				float visBottom = partial ? (texRect.w + texRect.z) * viewH : viewH;
+				float scaleX = spanX / viewW;
+				float scaleY = spanY / viewH;
+				FixedFunctionPass warp;
+				FixedFunctionPass horizonPass;
+				horizonPass.Blend = FixedFunctionPass::BlendMode::Alpha;
+				int stageCount = 2;
+				{
+					float screenLeft = leftX + visLeft * scaleX;
+					float screenRight = leftX + visRight * scaleX;
+					bool isCylinder = true;
+					vec4 cylinder = vec4(0.5f, 0.5f, 1.0f, 0.0f);
+					if (isCylinder) {
+						cylinder = UniformVec4(ctx, "uCylinder");
+					}
+					vec4 offsets = vec4(0.0f, 0.0f, 0.0f, 0.0f);
+					if (ctx.HasUniform("uHorizonOffset")) {
+						offsets = UniformVec4(ctx, "uHorizonOffset");
+					}
+					float centerX = (isCylinder ? cylinder.x : 0.5f + offsets.x) * viewW;
+					float horizonRow = floor((isCylinder ? cylinder.y : 0.5f + offsets.y) * viewH);
+					float fadeOn = isCylinder ? (cylinder.z > 0.5f ? 0.65f : 0.0f) : 1.0f - offsets.z;
+					float halfSize = isCylinder && cylinder.w > 0.5f ? 1.0f : 0.0f;
+					float warpC = 1.0f - (shift.y + 128.0f) / 256.0f;
+					float cylinderC = 1.0f - (shift.y + 128.0f + 128.0f * halfSize) / 256.0f;
+					float cylinderRate = (1.0f + halfSize) / viewH;
+					float flatDistance = !isCylinder && fadeOn > 0.5f ? 8.0f + 141.0f * 0.141421f : 0.0f;
+					float screenSpan = screenRight - screenLeft;
+					for (int stage = 0; stage < stageCount; stage++) {
+						float flatTop = max(horizonRow + 8.5f - flatDistance, visTop);
+						float flatBottom = min(horizonRow + flatDistance - 7.5f, visBottom);
+						if (flatBottom > flatTop && stage == stageCount - 1) {
+							StripPosition(ctx, 0, vec2(screenRight, topY + flatTop * scaleY));
+							StripPosition(ctx, 1, vec2(screenRight, topY + flatBottom * scaleY));
+							StripPosition(ctx, 2, vec2(screenLeft, topY + flatTop * scaleY));
+							StripPosition(ctx, 3, vec2(screenLeft, topY + flatBottom * scaleY));
+							StripUv(ctx, 0, vec2(0.0f, 0.0f));
+							StripUv(ctx, 1, vec2(0.0f, 0.0f));
+							StripUv(ctx, 2, vec2(0.0f, 0.0f));
+							StripUv(ctx, 3, vec2(0.0f, 0.0f));
+							StripColor(ctx, 0, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 1, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 2, vec4(horizon.xyz(), 1.0f));
+							StripColor(ctx, 3, vec4(horizon.xyz(), 1.0f));
+							SubmitStripShaded(ctx, horizonPass, 4);
+						}
+						for (int halfIndex = 0; halfIndex < 2; halfIndex++) {
+							float sigma = halfIndex == 0 ? 1.0f : -1.0f;
+							float dNear = halfIndex == 0 ? max(horizonRow + 0.5f, visTop) - horizonRow + 7.5f : horizonRow + 8.5f - min(horizonRow + 0.5f, visBottom);
+							float dFar = halfIndex == 0 ? visBottom - horizonRow + 7.5f : horizonRow + 8.5f - visTop;
+							float rowFrom = max(0.5f * viewH * float(halfIndex), visTop);
+							float rowTo = min(0.5f * viewH * float(halfIndex + 1), visBottom);
+							bool rising = !isCylinder && halfIndex == 1;
+							float bandRatio = sqrt(sqrt(sqrt(sqrt(max(dFar, 8.0f) / max(dNear, 8.0f)))));
+							if (16 > 16) {
+								bandRatio = sqrt(bandRatio);
+							}
+							float bandDistance = dNear;
+							if (isCylinder ? rowTo > rowFrom : dFar > dNear) {
+								for (int band = 0; band < 16; band++) {
+									float fa = float(band) / float(16);
+									float fb = float(band + 1) / float(16);
+									float pBandA = isCylinder ? rowFrom + (rowTo - rowFrom) * fa : bandDistance;
+									float pBandB = isCylinder ? rowFrom + (rowTo - rowFrom) * fb : band == 16 - 1 ? dFar : bandDistance * bandRatio;
+									bandDistance = pBandB;
+									pBandA = max(pBandA, flatDistance);
+									float tvBandA = isCylinder ? cylinderC - (pBandA - 0.5f - 0.5f * viewH) * cylinderRate : warpC + sigma * 60.0f / pBandA;
+									float tvBandB = isCylinder ? cylinderC - (pBandB - 0.5f - 0.5f * viewH) * cylinderRate : warpC + sigma * 60.0f / pBandB;
+									int crossings = int(abs(floor(tvBandB) - floor(tvBandA)));
+									for (int part = 0; part < 4; part++) {
+										float boundaryStart = rising ? floor(tvBandA) + float(part) : floor(tvBandA) - float(part - 1);
+										float boundaryEnd = rising ? floor(tvBandA) + 1.0f + float(part) : floor(tvBandA) - float(part);
+										bool lastPart = part >= crossings || part == 3;
+										float pA = pBandA;
+										float pB = pBandB;
+										if (isCylinder) {
+											if (part > 0) {
+												pA = 0.5f + 0.5f * viewH + (cylinderC - boundaryStart) / cylinderRate;
+											}
+											if (!lastPart) {
+												pB = 0.5f + 0.5f * viewH + (cylinderC - boundaryEnd) / cylinderRate;
+											}
+										} else {
+											if (part > 0) {
+												pA = 60.0f / (sigma * (boundaryStart - warpC));
+											}
+											if (!lastPart) {
+												pB = 60.0f / (sigma * (boundaryEnd - warpC));
+											}
+										}
+										if (part <= crossings && pB > pA && pBandB > pBandA) {
+											float sA = pA;
+											float sB = pB;
+											float tvA = 0.0f;
+											float tvB = 0.0f;
+											float slopeA = 0.0f;
+											float slopeB = 0.0f;
+											float uCenter = 0.0f;
+											float fromA = 0.0f;
+											float fromB = 0.0f;
+											if (isCylinder) {
+												float cosA = cos(3.14159265f * (pA - 0.5f - horizonRow) / viewH);
+												float cosB = cos(3.14159265f * (pB - 0.5f - horizonRow) / viewH);
+												slopeA = (halfSize > 0.5f ? 256.0f * (1.0f + 2.0f * cosA) : 128.0f * (2.0f + cosA)) / viewW;
+												slopeB = (halfSize > 0.5f ? 256.0f * (1.0f + 2.0f * cosB) : 128.0f * (2.0f + cosB)) / viewW;
+												tvA = cylinderC - (pA - 0.5f - 0.5f * viewH) * cylinderRate;
+												tvB = cylinderC - (pB - 0.5f - 0.5f * viewH) * cylinderRate;
+												uCenter = shift.x * 0.25f;
+												fromA = (pA - 0.5f - horizonRow) / 141.0f;
+												fromB = (pB - 0.5f - horizonRow) / 141.0f;
+											} else {
+												sA = halfIndex == 0 ? pA + horizonRow - 7.5f : horizonRow + 8.5f - pA;
+												sB = halfIndex == 0 ? pB + horizonRow - 7.5f : horizonRow + 8.5f - pB;
+												slopeA = 60.0f / pA;
+												slopeB = 60.0f / pB;
+												tvA = warpC + sigma * slopeA;
+												tvB = warpC + sigma * slopeB;
+												uCenter = shift.x;
+												fromA = (pA - 8.0f) / 141.0f;
+												fromB = (pB - 8.0f) / 141.0f;
+											}
+											float tintA = fadeOn * clamp(1.0f - fromA * fromA, 0.0f, 1.0f);
+											float tintB = fadeOn * clamp(1.0f - fromB * fromB, 0.0f, 1.0f);
+											bool swap = sA > sB;
+											float y0 = topY + spanY * (swap ? sB : sA) / viewH;
+											float y1 = topY + spanY * (swap ? sA : sB) / viewH;
+											float slope0 = swap ? slopeB : slopeA;
+											float slope1 = swap ? slopeA : slopeB;
+											float tv0 = swap ? tvB : tvA;
+											float tv1 = swap ? tvA : tvB;
+											float tint0 = swap ? tintB : tintA;
+											float tint1 = swap ? tintA : tintB;
+											float uLeft0 = (uCenter + (visLeft - 0.5f - centerX) * slope0) / 256.0f;
+											float uRight0 = (uCenter + (visRight - 0.5f - centerX) * slope0) / 256.0f;
+											float uLeft1 = (uCenter + (visLeft - 0.5f - centerX) * slope1) / 256.0f;
+											float uRight1 = (uCenter + (visRight - 0.5f - centerX) * slope1) / 256.0f;
+											if (stage == 0) {
+												float vBase = floor(0.5f * (tv0 + tv1));
+												float v0 = tv0 - vBase;
+												float v1 = tv1 - vBase;
+												float uBase = floor(min(uLeft0, uLeft1));
+												for (int column = 0; column <= 2; column++) {
+													float across = float(column) / float(2);
+													StripPosition(ctx, 2 * column, vec2(screenLeft + across * screenSpan, y0));
+													StripPosition(ctx, 2 * column + 1, vec2(screenLeft + across * screenSpan, y1));
+													StripUv(ctx, 2 * column, vec2(uLeft0 + across * (uRight0 - uLeft0) - uBase, v0));
+													StripUv(ctx, 2 * column + 1, vec2(uLeft1 + across * (uRight1 - uLeft1) - uBase, v1));
+													StripColor(ctx, 2 * column, vec4(horizon.xyz(), tint0));
+													StripColor(ctx, 2 * column + 1, vec4(horizon.xyz(), tint1));
+												}
+												SubmitStrip(ctx, warp, 2 * (2 + 1));
+											}
+											if (stage == 1 && (tint0 > 0.0f || tint1 > 0.0f)) {
+												StripPosition(ctx, 0, vec2(screenRight, y0));
+												StripPosition(ctx, 1, vec2(screenRight, y1));
+												StripPosition(ctx, 2, vec2(screenLeft, y0));
+												StripPosition(ctx, 3, vec2(screenLeft, y1));
+												StripColor(ctx, 0, vec4(horizon.xyz(), tint0));
+												StripColor(ctx, 1, vec4(horizon.xyz(), tint1));
+												StripColor(ctx, 2, vec4(horizon.xyz(), tint0));
+												StripColor(ctx, 3, vec4(horizon.xyz(), tint1));
+												SubmitStripShaded(ctx, horizonPass, 4);
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// TexturedBackgroundTunnel (PLUS) - from TexturedBackgroundTunnel.shader:fixed_function(gu)
+		// Shared by: TexturedBackgroundTunnel (PLUS), TexturedBackgroundTunnel (PLUS_DITHER), TexturedBackgroundTunnel (PLUS_KEYED)
+		void TexturedBackgroundTunnel_PLUS_Effect(EffectContext& ctx)
+		{
+			using namespace ff;
+			StripReset();
+			if (!ctx.HasUniform("uViewSize") || !ctx.HasUniform("uShift") || !ctx.HasUniform("uHorizonColor")) {
+				FixedFunctionPass fallback;
+				ctx.SubmitQuad(fallback);
+			} else {
+				vec2 viewSize = UniformVec2(ctx, "uViewSize");
+				vec2 shift = UniformVec2(ctx, "uShift");
+				vec4 horizon = UniformVec4(ctx, "uHorizonColor");
+				float leftX = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).x;
+				float spanX = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy()).x;
+				float topY = vec2(ctx.QuadOriginX(), ctx.QuadOriginY()).y;
+				float spanY = vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy()).y;
+				vec4 texRect = vec4(ctx.TexRect[0], ctx.TexRect[1], ctx.TexRect[2], ctx.TexRect[3]);
+				bool partial = texRect.x > 0.0f && texRect.z > 0.0f && (texRect.x < 0.9999f || texRect.z < 0.9999f || abs(texRect.y) > 0.0001f || abs(texRect.w) > 0.0001f);
+				if (partial) {
+					StripClip(ctx, vec4(min(leftX, leftX + spanX), min(topY, topY + spanY), max(leftX, leftX + spanX), max(topY, topY + spanY)));
+					spanX = spanX / texRect.x;
+					spanY = spanY / texRect.z;
+					leftX = leftX - texRect.y * spanX;
+					topY = topY - texRect.w * spanY;
+				}
+				float viewW = max(viewSize.x, 1.0f);
+				float viewH = max(viewSize.y, 1.0f);
+				float visLeft = partial ? texRect.y * viewW : 0.0f;
+				float visRight = partial ? (texRect.y + texRect.x) * viewW : viewW;
+				float visTop = partial ? texRect.w * viewH : 0.0f;
+				float visBottom = partial ? (texRect.w + texRect.z) * viewH : viewH;
+				float scaleX = spanX / viewW;
+				float scaleY = spanY / viewH;
+				FixedFunctionPass warp;
+				FixedFunctionPass horizonPass;
+				horizonPass.Blend = FixedFunctionPass::BlendMode::Alpha;
+				int stageCount = 2;
+				{
+					vec4 tunnel = UniformVec4(ctx, "uTunnel");
+					float centerX = tunnel.x * viewW;
+					float centerY = floor(tunnel.y * viewH);
+					float fadeOn = tunnel.z > 0.5f ? 1.0f : 0.0f;
+					float spiral = tunnel.w > 0.5f ? 1.0f : 0.0f;
+					float screenX = leftX + (centerX + 0.5f) * scaleX;
+					float screenY = topY + (centerY + 0.5f) * scaleY;
+					float farX = max(abs(visLeft - centerX - 0.5f), abs(visRight - centerX - 0.5f));
+					float farY = max(abs(visTop - centerY - 0.5f), abs(visBottom - centerY - 0.5f));
+					float farthest = sqrt(farX * farX + farY * farY) + 1.0f;
+					float nearX = max(max(visLeft - centerX - 0.5f, centerX + 0.5f - visRight), 0.0f);
+					float nearY = max(max(visTop - centerY - 0.5f, centerY + 0.5f - visBottom), 0.0f);
+					float nearest = sqrt(nearX * nearX + nearY * nearY) - 1.0f;
+					bool quarterRings = 0.5f < 0.3f;
+					float vC = 1.0f - shift.y / 256.0f;
+					float vSteps = floor(vC / 0.5f);
+					float f = vC - vSteps * 0.5f;
+					float firstRadius = 1.0f - f * (0.693147f - f * (0.240227f - f * (0.0555041f - f * 0.0096181f)));
+					float g = 0.15f * f;
+					float firstSpiral = 1.0f + g * (0.693147f + g * (0.240227f + g * 0.0555041f));
+					float ringFactor = quarterRings ? 1.18920712f : 1.41421356f;
+					float spiralFactor = quarterRings ? 0.974342f : 0.949342f;
+					int ringCount = quarterRings ? 52 : false ? 26 : 23;
+					int ringStart = quarterRings ? (false ? -2 : 4) : false ? -1 : 2;
+					float startRadius = false ? 0.707107f : 2.0f;
+					float startSpiral = false ? 1.05330f : 0.901250f;
+					bool fineSectors = 16 > 16;
+					float cornerFactor = fineSectors ? 1.0048386f : 1.0195911f;
+					float cornerLog = fineSectors ? 0.0069638f : 0.0279914f;
+					int groupCount = (16 + 2) / 3;
+					float uOrigin = (shift.x * 0.25f + 64.0f) / 256.0f;
+					float sectorStep = 6.28318531f / float(16);
+					float stepCos = cos(sectorStep);
+					float stepSin = sin(sectorStep);
+					float flatRadius = fadeOn > 0.5f ? 87.0f / sqrt(0.98f + 0.0414f) : 0.0f;
+					for (int stage = 0; stage < stageCount; stage++) {
+						float ringRadius = firstRadius * startRadius;
+						float ringSpiral = firstSpiral * startSpiral;
+						bool flatPending = flatRadius > 0.0f;
+						for (int ring = 0; ring < ringCount; ring++) {
+							float innerR = ringRadius;
+							float outerR = ringRadius * ringFactor;
+							float innerS = ringSpiral;
+							float outerS = ringSpiral * spiralFactor;
+							ringRadius = outerR;
+							ringSpiral = outerS;
+							bool isFlat = outerR <= flatRadius;
+							bool drawsFlat = flatPending && !isFlat;
+							if (drawsFlat) {
+								flatPending = false;
+							}
+							float outerCorner = outerR * cornerFactor;
+							float innerCorner = ring == 0 ? 0.0f : innerR;
+							bool ringSeen = innerR < farthest && outerCorner > nearest;
+							bool flatSeen = drawsFlat && innerCorner > nearest && stage == stageCount - 1;
+							if (!isFlat && (ringSeen || flatSeen)) {
+								float tvInner = 0.5f * (vSteps + float(ring + ringStart));
+								float tvBase = floor(tvInner + 0.5f * 0.5f);
+								float v0 = tvInner - tvBase;
+								float v1 = tvInner + 0.5f + cornerLog - tvBase;
+								float twistInner = spiral * (356.2f * innerS - 91.0f) / 256.0f;
+								float twistOuter = spiral * (356.2f * outerS - 91.0f) / 256.0f;
+								float seam = uOrigin + twistInner;
+								seam = seam - floor(seam);
+								float startAngle = -seam * 6.28318531f;
+								float twist = twistOuter - twistInner;
+								float tintInner = fadeOn * clamp(7569.0f / (innerR * innerR) - 0.0414f, 0.0f, 1.0f);
+								float tintOuter = fadeOn * clamp(7569.0f / (outerR * outerR) - 0.0414f, 0.0f, 1.0f);
+								if (flatSeen && innerCorner > 0.0f) {
+									int flatStrips = (16 + 3) / 6;
+									for (int flatStrip = 0; flatStrip < 6; flatStrip++) {
+										if (flatStrip < flatStrips) {
+											int first = flatStrip * 6;
+											int count = min(8, 16 - first);
+											for (int j = 0; j < 8; j++) {
+												if (j < count) {
+													int z = first + j;
+													int corner = z - 2 * (z / 2) == 0 ? z / 2 : 16 - 1 - (z - 1) / 2;
+													float angle = startAngle + float(corner) * sectorStep;
+													StripPosition(ctx, j, vec2(screenX + innerCorner * cos(angle) * scaleX, screenY + innerCorner * sin(angle) * scaleY));
+													StripUv(ctx, j, vec2(0.0f, 0.0f));
+													StripColor(ctx, j, vec4(horizon.xyz(), 1.0f));
+												}
+											}
+											SubmitStripShaded(ctx, horizonPass, count);
+										}
+									}
+								}
+								if (ringSeen) {
+									float ca = cos(startAngle);
+									float sa = sin(startAngle);
+									for (int group = 0; group < groupCount; group++) {
+										int firstSector = group * 3;
+										int sectors = min(3, 16 - firstSector);
+										if (stage == 0 || tintInner > 0.0f || tintOuter > 0.0f) {
+											for (int k = 0; k < 4; k++) {
+												if (k <= sectors) {
+													if (k > 0) {
+														float turnedCos = ca * stepCos - sa * stepSin;
+														sa = sa * stepCos + ca * stepSin;
+														ca = turnedCos;
+													}
+													float u = float(firstSector + k) / float(16);
+													StripPosition(ctx, 2 * k, vec2(screenX + innerCorner * ca * scaleX, screenY + innerCorner * sa * scaleY));
+													StripPosition(ctx, 2 * k + 1, vec2(screenX + outerCorner * ca * scaleX, screenY + outerCorner * sa * scaleY));
+													StripUv(ctx, 2 * k, vec2(u, v0));
+													StripUv(ctx, 2 * k + 1, vec2(u + twist, v1));
+													StripColor(ctx, 2 * k, vec4(horizon.xyz(), tintInner));
+													StripColor(ctx, 2 * k + 1, vec4(horizon.xyz(), tintOuter));
+												}
+											}
+											if (stage == 0) {
+												SubmitStrip(ctx, warp, 2 * (sectors + 1));
+											} else {
+												SubmitStripShaded(ctx, horizonPass, 2 * (sectors + 1));
+											}
 										}
 									}
 								}
@@ -611,6 +1589,7 @@ namespace nCine::RHI::GU
 		void Transition_Effect(EffectContext& ctx)
 		{
 			using namespace ff;
+			StripReset();
 			const vec4 COLOR = LoadColor(ctx.Color());
 			vec2 axisX = vec2(ctx.QuadAxisXx(), ctx.QuadAxisXy());
 			vec2 axisY = vec2(ctx.QuadAxisYx(), ctx.QuadAxisYy());
@@ -654,27 +1633,14 @@ namespace nCine::RHI::GU
 					StripColor(ctx, 7, vec4(0.0f, 0.0f, 0.0f, 1.0f));
 					StripColor(ctx, 8, vec4(0.0f, 0.0f, 0.0f, 1.0f));
 					StripColor(ctx, 9, vec4(0.0f, 0.0f, 0.0f, 1.0f));
-					ctx.SubmitStripShaded(p, 10);
+					SubmitStripShaded(ctx, p, 10);
 				}
 			}
 		}
 
-		// WhiteMask - from WhiteMask.shader:fixed_function()
-		// Shared by: WhiteMask, WhiteMask (USE_PALETTE), BatchedWhiteMask, BatchedWhiteMask (USE_PALETTE)
-		void WhiteMask_Effect(EffectContext& ctx)
-		{
-			using namespace ff;
-			const vec4 COLOR = LoadColor(ctx.Color());
-			FixedFunctionPass p;
-			Store(p.Color, vec4(0.0f, 0.0f, 0.0f, COLOR.w));
-			Store(p.OffsetColor, COLOR.xyz());
-			p.HasOffsetColor = true;
-			ctx.SubmitQuad(p);
-		}
-
 		constexpr FixedFunctionGeneratedEffect FixedFunctionGeneratedEffects[] = {
-			{ "BatchedShieldFire", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldFire_Effect },
-			{ "BatchedShieldLightning", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldLightning_Effect },
+			{ "BatchedShieldFire", "", true, FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldFire_Effect },
+			{ "BatchedShieldLightning", "", true, FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldLightning_Effect },
 			{ "Colorized", "", false, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &Colorized_Effect },
 			{ "BatchedColorized", "", false, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &Colorized_Effect },
 			{ "Combine", "", false, FixedFunctionRequirements::None, FixedFunctionIntrinsic::LightingCombine, nullptr },
@@ -699,19 +1665,34 @@ namespace nCine::RHI::GU
 			{ "PartialWhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &PartialWhiteMask_Effect },
 			{ "BatchedPartialWhiteMask", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &PartialWhiteMask_Effect },
 			{ "BatchedPartialWhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &PartialWhiteMask_Effect },
-			{ "ShieldFire", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldFire_Effect },
-			{ "ShieldLightning", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldLightning_Effect },
+			{ "ShieldFire", "", true, FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldFire_Effect },
+			{ "ShieldLightning", "", true, FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &BatchedShieldLightning_Effect },
+			{ "SingleColor", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "SingleColor", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "BatchedSingleColor", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "BatchedSingleColor", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
 			{ "TexturedBackground", "", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
 			{ "TexturedBackground", "DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
-			{ "TexturedBackgroundCircle", "", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
-			{ "TexturedBackgroundCircle", "DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
+			{ "TexturedBackground", "KEYED", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
+			{ "TexturedBackground", "PLUS", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_PLUS_Effect },
+			{ "TexturedBackground", "PLUS_DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_PLUS_Effect },
+			{ "TexturedBackground", "PLUS_KEYED", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_PLUS_Effect },
+			{ "TexturedBackgroundCylinder", "", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundCylinder_Effect },
+			{ "TexturedBackgroundCylinder", "DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundCylinder_Effect },
+			{ "TexturedBackgroundCylinder", "KEYED", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundCylinder_Effect },
+			{ "TexturedBackgroundTunnel", "", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
+			{ "TexturedBackgroundTunnel", "DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
+			{ "TexturedBackgroundTunnel", "KEYED", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackground_Effect },
+			{ "TexturedBackgroundTunnel", "PLUS", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundTunnel_PLUS_Effect },
+			{ "TexturedBackgroundTunnel", "PLUS_DITHER", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundTunnel_PLUS_Effect },
+			{ "TexturedBackgroundTunnel", "PLUS_KEYED", false, FixedFunctionRequirements::NeedsUniforms | FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes | FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &TexturedBackgroundTunnel_PLUS_Effect },
 			{ "TileMapMesh", "", false, FixedFunctionRequirements::None, FixedFunctionIntrinsic::TileMapMesh, nullptr },
 			{ "TileMapMeshPalette", "", false, FixedFunctionRequirements::None, FixedFunctionIntrinsic::TileMapMesh, nullptr },
 			{ "Transition", "", false, FixedFunctionRequirements::NeedsStripBuilder | FixedFunctionRequirements::NeedsQuadAxes, FixedFunctionIntrinsic::None, &Transition_Effect },
-			{ "WhiteMask", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &WhiteMask_Effect },
-			{ "WhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &WhiteMask_Effect },
-			{ "BatchedWhiteMask", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &WhiteMask_Effect },
-			{ "BatchedWhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &WhiteMask_Effect },
+			{ "WhiteMask", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "WhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "BatchedWhiteMask", "", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
+			{ "BatchedWhiteMask", "USE_PALETTE", true, FixedFunctionRequirements::SamplesTexture, FixedFunctionIntrinsic::None, &SingleColor_Effect },
 		};
 		constexpr std::size_t FixedFunctionGeneratedEffectCount = sizeof(FixedFunctionGeneratedEffects) / sizeof(FixedFunctionGeneratedEffects[0]);
 	}

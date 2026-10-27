@@ -2,6 +2,8 @@
 
 #if defined(WITH_EDITOR)
 
+#include "../UI/UiTheme.h"
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -11,11 +13,20 @@ namespace Jazz2::Editor
 {
 	namespace
 	{
-		// Steps of the zoom, scales above 1 are whole numbers, so every pixel of the level is just as large
-		const float ScaleSteps[] = {
-			1.0f / 32.0f, 1.0f / 24.0f, 1.0f / 16.0f, 1.0f / 12.0f, 1.0f / 10.0f,
-			1.0f / 8.0f, 1.0f / 6.0f, 1.0f / 5.0f, 1.0f / 4.0f, 1.0f / 3.0f, 1.0f / 2.0f, 2.0f / 3.0f, 3.0f / 4.0f,
-			1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 10.0f, 12.0f, 14.0f, 16.0f, 20.0f, 24.0f, 28.0f, 32.0f
+		// std::asinh() is C99, which isn't in `std` on every console. Taken of the magnitude, so a large negative value
+		// doesn't lose its precision to the subtraction, and in double, so the square doesn't overflow
+		float Asinh(float value)
+		{
+			double magnitude = std::abs(double(value));
+			double result = std::log(magnitude + std::sqrt(magnitude * magnitude + 1.0));
+			return float(value < 0.0f ? -result : result);
+		}
+
+		// Steps of the zoom as parts of how large the game shows the level (see GetGameplayScale()), round percentages,
+		// each a fifth to a third larger than the one before
+		const float ZoomLevels[] = {
+			0.01f, 0.015f, 0.02f, 0.025f, 0.03f, 0.04f, 0.05f, 0.06f, 0.08f, 0.10f, 0.12f, 0.15f, 0.20f, 0.25f, 0.30f, 0.40f,
+			0.50f, 0.60f, 0.75f, 0.90f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f
 		};
 
 		// The farthest the view gets, a tile is a pixel there
@@ -49,7 +60,7 @@ namespace Jazz2::Editor
 
 	void EditorCamera::SetView(Vector2i viewSize, float gameplayScale)
 	{
-		_viewSize = Vector2i(std::max(viewSize.X, 1), std::max(viewSize.Y, 1));
+		_viewSize = Vector2i(std::max<std::int32_t>(viewSize.X, 1), std::max<std::int32_t>(viewSize.Y, 1));
 		_gameplayScale = (gameplayScale > 0.0f ? gameplayScale : 1.0f);
 		_scale = std::clamp(_scale, GetMinScale(), GetMaxScale());
 		_targetScale = std::clamp(_targetScale, GetMinScale(), GetMaxScale());
@@ -128,6 +139,12 @@ namespace Jazz2::Editor
 			// The dragged point stays under the pointer, it's the one zoomed at
 			_dragAnchorWorld = ViewToWorld(_dragLastView);
 		}
+		if (_zooming && UiTheme::ReducedMotion) {
+			// With reduced motion, at once
+			_scale = _targetScale;
+			_zooming = false;
+			ApplyZoomAnchor();
+		}
 	}
 
 	void EditorCamera::ZoomBy(Vector2f viewPos, float factor)
@@ -190,8 +207,8 @@ namespace Jazz2::Editor
 			return;
 		}
 		_dragging = false;
-		// The pointer stood still before it was let go, so the view stays where it is
-		if (_dragFrames > 4.0f) {
+		// The pointer stood still before it was let go, so the view stays where it is, with reduced motion always
+		if (_dragFrames > 4.0f || UiTheme::ReducedMotion) {
 			_velocity = Vector2f::Zero;
 		}
 	}
@@ -199,6 +216,11 @@ namespace Jazz2::Editor
 	void EditorCamera::FlyTo(Vector2f center, float scale)
 	{
 		scale = std::clamp(scale, GetMinScale(), GetMaxScale());
+		if (UiTheme::ReducedMotion) {
+			// With reduced motion, the view is there at once
+			JumpTo(center, scale);
+			return;
+		}
 
 		_zooming = false;
 		_dragging = false;
@@ -223,8 +245,9 @@ namespace Jazz2::Editor
 			float w0 = _flyWidth0, w1 = _flyWidth1, u1 = _flyDistance;
 			float b0 = (w1 * w1 - w0 * w0 + rho4 * u1 * u1) / (2.0f * w0 * rho2 * u1);
 			float b1 = (w1 * w1 - w0 * w0 - rho4 * u1 * u1) / (2.0f * w1 * rho2 * u1);
-			_flyR0 = std::log(-b0 + std::sqrt(b0 * b0 + 1.0f));
-			float r1 = std::log(-b1 + std::sqrt(b1 * b1 + 1.0f));
+			// log(-b + sqrt(b² + 1)) of the paper is -asinh(b), which doesn't lose the precision for a long flight from close up
+			_flyR0 = -Asinh(b0);
+			float r1 = -Asinh(b1);
 			_flyLength = (r1 - _flyR0) / rho;
 		}
 
@@ -246,7 +269,7 @@ namespace Jazz2::Editor
 		}
 
 		float scale = std::min(_viewSize.X / worldRect.W, _viewSize.Y / worldRect.H) * 0.95f;
-		// The largest step that fits, so it's still crisp
+		// The largest step that fits
 		float snapped = SnapScale(scale * 1.0001f, -1);
 		if (snapped <= scale) {
 			scale = snapped;
@@ -332,7 +355,8 @@ namespace Jazz2::Editor
 
 		if (direction > 0) {
 			result = maxScale;
-			for (float step : ScaleSteps) {
+			for (float zoom : ZoomLevels) {
+				float step = zoom * _gameplayScale;
 				if (step > scale * 1.001f) {
 					result = step;
 					break;
@@ -340,15 +364,17 @@ namespace Jazz2::Editor
 			}
 		} else if (direction < 0) {
 			result = minScale;
-			for (std::size_t i = std::size(ScaleSteps); i > 0; i--) {
-				if (ScaleSteps[i - 1] < scale * 0.999f) {
-					result = ScaleSteps[i - 1];
+			for (std::size_t i = std::size(ZoomLevels); i > 0; i--) {
+				float step = ZoomLevels[i - 1] * _gameplayScale;
+				if (step < scale * 0.999f) {
+					result = step;
 					break;
 				}
 			}
 		} else {
 			float bestDistance = FLT_MAX;
-			for (float step : ScaleSteps) {
+			for (float zoom : ZoomLevels) {
+				float step = zoom * _gameplayScale;
 				float distance = std::abs(std::log(step / scale));
 				if (distance < bestDistance) {
 					bestDistance = distance;

@@ -31,7 +31,7 @@ namespace nCine::RHI::PVR
 		// PackBits run-length coding for the host pixel stores. Indexed pixel art is dominated by runs
 		// (transparent texels, flat fills), and measured on the stock levels the R8/RG8 stores shrink to
 		// 33-42% - about 3 MB less main memory per level, which is what makes the biggest levels (e.g.
-		// "secretf/04_haunted1", "xmas99/02_xmas2") fit into the console's 16 MB at all. Header byte n:
+		// "secretf/haunted1", "xmas99/xmas2") fit into the console's 16 MB at all. Header byte n:
 		// 0..127 = copy the next n+1 bytes verbatim, 129..255 = repeat the next byte 257-n times; worst
 		// case grows by 1 byte per 128 (on data that would not stay compressed anyway - see StorePixels).
 		void EncodePackBits(const std::uint8_t* src, std::size_t size, SmallVector<std::uint8_t, 0>& out)
@@ -370,7 +370,7 @@ namespace nCine::RHI::PVR
 			raw.resize_for_overwrite(rawSize);
 			RlePixelReader reader(_pixels.data());
 			reader.Read(raw.data(), rawSize);
-			_pixels = std::move(raw);
+			_pixels = Death::move(raw);
 			_pixelsCompressed = false;
 		} else if (_pixels.empty()) {
 			// A compressible texture defers its store until the first upload; a partial first upload
@@ -388,7 +388,7 @@ namespace nCine::RHI::PVR
 		SmallVector<std::uint8_t, 0> compressed;
 		EncodePackBits(_pixels.data(), rawSize, compressed);
 		if (compressed.size() < rawSize) {
-			_pixels = std::move(compressed);
+			_pixels = Death::move(compressed);
 			_pixelsCompressed = true;
 		}
 	}

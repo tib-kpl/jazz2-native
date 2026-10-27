@@ -38,7 +38,7 @@ namespace Jazz2::UI::Menu
 
 		_items.clear();
 
-		// TRANSLATORS: Menu item in main menu
+		// TRANSLATORS: Menu item in pause menu
 		_items.emplace_back(Item::Resume, _("Resume"));
 
 #if defined(WITH_EDITOR)
@@ -55,44 +55,38 @@ namespace Jazz2::UI::Menu
 		if (!isLocalSession) {
 			if (isSpectating) {
 				// Leaving spectate returns to the lobby so the player can pick a (possibly different) character
-				// TRANSLATORS: Menu item in main menu
+				// TRANSLATORS: Menu item in pause menu
 				_items.emplace_back(Item::ChangeCharacter, _("Join Game"));
 			} else if (isSpectateAvailable) {
-				// TRANSLATORS: Menu item in main menu
+				// TRANSLATORS: Menu item in pause menu
 				_items.emplace_back(Item::Spectate, _("Spectate"));
 			} else {
 				// Spectate is disabled by the server; offer returning to the lobby to change character instead
-				// TRANSLATORS: Menu item in main menu
+				// TRANSLATORS: Menu item in pause menu
 				_items.emplace_back(Item::ChangeCharacter, _("Change Character"));
 			}
 		}
 #endif
 
-		// TRANSLATORS: Menu item in main menu
+		// TRANSLATORS: Menu item in pause menu
 		_items.emplace_back(Item::Options, _("Options"));
 
 #if defined(WITH_EDITOR)
-		if (auto inGameMenu = runtime_cast<InGameMenu>(_root)) {
-			if (isEditorPlayTest) {
-				// TRANSLATORS: Menu item in pause menu of a level played from the level editor
-				_items.emplace_back(Item::ExitEditor, _("Exit Editor"));
-				_animation = 0.0f;
-				_touchStart = Vector2f::Zero;
-				_touchLast = Vector2f::Zero;
-				return;
-			}
-			if (inGameMenu->CanOpenInEditor()) {
-				// TRANSLATORS: Menu item in pause menu, opens the level in the level editor
-				_items.emplace_back(Item::EditLevel, _("Edit This Level"));
-			}
+		if (isEditorPlayTest) {
+			// TRANSLATORS: Menu item in pause menu of a level played from the level editor
+			_items.emplace_back(Item::ExitEditor, _("Exit Editor"));
+			_animation = 0.0f;
+			_touchStart = Vector2f::Zero;
+			_touchLast = Vector2f::Zero;
+			return;
 		}
 #endif
 
 #if defined(WITH_MULTIPLAYER)
-		// TRANSLATORS: Menu item in main menu
+		// TRANSLATORS: Menu item in pause menu
 		_items.emplace_back(Item::Exit, isLocalSession ? _("Save & Exit") : _("Disconnect & Exit"));
 #else
-		// TRANSLATORS: Menu item in main menu
+		// TRANSLATORS: Menu item in pause menu
 		_items.emplace_back(Item::Exit, _("Save & Exit"));
 #endif
 
@@ -269,13 +263,6 @@ namespace Jazz2::UI::Menu
 				break;
 			}
 #if defined(WITH_EDITOR)
-			case Item::EditLevel: {
-				_root->PlaySfx("MenuSelect"_s, 0.6f);
-				if (auto inGameMenu = runtime_cast<InGameMenu>(_root)) {
-					inGameMenu->OpenInEditor();
-				}
-				break;
-			}
 			case Item::BackToEditor: {
 				_root->PlaySfx("MenuSelect"_s, 0.6f);
 				if (auto inGameMenu = runtime_cast<InGameMenu>(_root)) {

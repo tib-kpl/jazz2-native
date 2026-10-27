@@ -5,12 +5,15 @@
 // platforms that cannot convert anything themselves, and for build pipelines.
 
 #include "CartridgeImage.h"
+#include "ContentFilter.h"
 #include "DiscImage.h"
 #include "FontPacker.h"
 #include "FormatVerifier.h"
+#include "LevelText.h"
 #include "ModuleConverter.h"
 #include "N64Content.h"
 #include "SpriteRepacker.h"
+#include "TranslationFilter.h"
 
 #include "../../Main.h"
 #include "../../Jazz2/ContentFileTypes.h"
@@ -35,23 +38,7 @@
 #include <string>
 
 #if defined(DEATH_TARGET_EMSCRIPTEN)
-#	include <cerrno>
-#	include <sys/types.h>
 #	include <emscripten.h>
-
-/**
-	Emscripten's libc declares fallocate() without implementing it, and the base layer's FileSystem::Copy() calls it -
-	only to preallocate the copy, and it carries on when the call says it is not supported, which is what this says
-*/
-extern "C" int fallocate(int fd, int mode, off_t offset, off_t length)
-{
-	static_cast<void>(fd);
-	static_cast<void>(mode);
-	static_cast<void>(offset);
-	static_cast<void>(length);
-	errno = ENOSYS;
-	return -1;
-}
 
 /** Version of the game this tool was built for, the page shows it when a conversion starts (see Web/assetpacker-worker.js) */
 extern "C" EMSCRIPTEN_KEEPALIVE const char* GetGameVersion()
@@ -167,7 +154,13 @@ namespace
 		/** @brief Make a bootable GameCube disc image out of the executable, its apploader and a content directory */
 		CreateImage,
 		/** @brief Check that every level and tile set in a directory is written back unchanged after being read, see @ref AssetPacker::FormatVerifier */
-		VerifyFormats
+		VerifyFormats,
+		/** @brief Write a level as text, for version control, see @ref AssetPacker::LevelText */
+		LevelToText,
+		/** @brief Make a level of its text again, see @ref AssetPacker::LevelText */
+		TextToLevel,
+		/** @brief Attack the readers of levels and tile sets with mutated files, see @ref AssetPacker::FormatVerifier::FuzzDirectory() */
+		FuzzFormats
 	};
 
 	struct Options {
@@ -203,12 +196,18 @@ namespace
 		bool Lz4Images = false;
 		/** @brief Whether re-encoded cinematics get their frames in LZ4, see @ref ProfileUsesLz4Videos() */
 		bool Lz4Videos = false;
+		/** @brief Whether the translations keep the texts of the level editor, see @ref ProfileHasEditor() */
+		bool HasEditor = true;
 		/** @brief The apploader named by `--apploader=`, which `create-image` puts on the disc */
 		String ApploaderPath;
 		/** @brief The game ID named by `--game-id=`, see @ref DefaultGameCubeGameId */
 		String GameId;
 		/** @brief The name the disc header carries, named by `--title=` */
 		String Title;
+		/** @brief What `fuzz-formats` does, named by `--iterations=`, `--seed=`, `--timeout=` and `--memory-limit=` */
+		AssetPacker::FormatVerifier::FuzzOptions Fuzz;
+		/** @brief Whether `verify-formats` also reads every level cut short, named by `--sweep-truncated` */
+		bool SweepTruncated = false;
 	};
 
 	/** @brief Game ID of a GameCube disc when `--game-id=` names none, the one the game is built with (see @ref NCINE_GAMECUBE_GAME_ID) */
@@ -258,6 +257,12 @@ namespace
 			command = Command::CreateImage;
 		} else if (value == "verify-formats"_s) {
 			command = Command::VerifyFormats;
+		} else if (value == "level-to-text"_s) {
+			command = Command::LevelToText;
+		} else if (value == "text-to-level"_s) {
+			command = Command::TextToLevel;
+		} else if (value == "fuzz-formats"_s) {
+			command = Command::FuzzFormats;
 		} else {
 			return false;
 		}
@@ -317,13 +322,27 @@ namespace
 		return (value == "dreamcast"_s || value == "gamecube"_s || value == "ps2"_s);
 	}
 
+	/**
+		@brief Whether the build of the game for a target profile has the level editor
+
+		The consoles that read all their content from a cartridge or a disc are built without it (see `WITH_EDITOR`),
+		so the texts of its `editor` context are left out of their translations (see @ref AssetPacker::TranslationFilter)
+		and what only it reads out of their tree (see @ref AssetPacker::ContentFilter). The generic `console` profile
+		keeps them, as it doesn't say which console the tree is for.
+	*/
+	bool ProfileHasEditor(StringView value)
+	{
+		return !(value == "n64"_s || value == "dreamcast"_s || value == "ps2"_s || value == "gamecube"_s);
+	}
+
 	bool TryParseProfile(StringView value, TargetProfile& profile, std::int32_t& defaultVideoDownscale, bool& isN64, bool& lz4Images,
-		bool& lz4Videos)
+		bool& lz4Videos, bool& hasEditor)
 	{
 		defaultVideoDownscale = DefaultVideoDownscaleForProfile(value);
 		isN64 = (value == "n64"_s);
 		lz4Images = ProfileUsesLz4Images(value);
 		lz4Videos = ProfileUsesLz4Videos(value);
+		hasEditor = ProfileHasEditor(value);
 		if (value == "desktop"_s) {
 			profile = TargetProfile::Desktop;
 		} else if (value == "console"_s || value == "dreamcast"_s || value == "wii"_s || value == "gamecube"_s ||
@@ -358,7 +377,8 @@ namespace
 		LOGI("    --target=<profile>   desktop (default) | console | dreamcast | wii | gamecube | psp | ps2 | n64 |");
 		LOGI("                         emscripten. dreamcast, ps2, gamecube and n64 get their sprite sheets and");
 		LOGI("                         tilesets in LZ4, and dreamcast, gamecube and ps2 the frames of their");
-		LOGI("                         re-encoded cinematics too, which only their builds decode");
+		LOGI("                         re-encoded cinematics too, which only their builds decode. Their builds");
+		LOGI("                         have no level editor either, so its texts are left out of the translations");
 		LOGI("    --n64-tools=<dir>    libdragon toolchain (or its \"bin\") for --target=n64, if N64_INST is not set.");
 		LOGI("                         That profile stores the sound effects, the music and the cinematics in");
 		LOGI("                         libdragon's formats, made with audioconv64, and videoconv64 with ffmpeg,");
@@ -413,9 +433,23 @@ namespace
 		LOGI("    with (built by the GameCube target, see GameCubeApploader.c). --game-id= is the six characters of the");
 		LOGI("    game and maker codes (default {}), --title= the name in the header (default \"{}\")",
 			DefaultGameCubeGameId, DefaultGameCubeTitle);
-		LOGI("  verify-formats <directory>");
+		LOGI("  verify-formats <directory> [--sweep-truncated]");
 		LOGI("    Reads every level and tile set in the game's own format under <directory> and writes it back into");
-		LOGI("    memory, which has to give the same file byte for byte. Original JJ2 files are skipped");
+		LOGI("    memory, which has to give the same file byte for byte. Original JJ2 files are skipped.");
+		LOGI("    --sweep-truncated also reads every file cut short at 76 places, none of which may be read as");
+		LOGI("    something it isn't - which makes the check many times slower");
+		LOGI("  level-to-text <source .j2l> <target .txt>");
+		LOGI("    Writes a level of the game's own format as text, one thing on a line, so its versions can be compared");
+		LOGI("    and merged by the usual tools. The text is checked to give the same level again before it's written");
+		LOGI("  text-to-level <source .txt> <target .j2l>");
+		LOGI("    Makes the level of such a text again, the same file byte for byte as the level it came from");
+		LOGI("  fuzz-formats <directory> [<findings directory>] [--iterations=N] [--seed=N] [--timeout=seconds]");
+		LOGI("               [--memory-limit=MB] [--focus-level-texts]");
+		LOGI("    Attacks the readers with seeded random mutations of every level and tile set in the game's own format");
+		LOGI("    under <directory>, also inside their compressed content. An input that crashes, asserts, hangs, asks");
+		LOGI("    for too much memory or isn't written back the same is saved into <findings directory> (default");
+		LOGI("    \"FuzzFindings\"). Given a single file instead, only runs it through the readers once, to reproduce one.");
+		LOGI("    --focus-level-texts attacks only levels, each given a chunk of translated texts, and that chunk more");
 	}
 
 	/** @brief Works out everything the profile named by `--target=` implies */
@@ -423,7 +457,8 @@ namespace
 	{
 		std::int32_t profileVideoDownscale = 0;
 		if (!options.ProfileName.empty() &&
-			!TryParseProfile(options.ProfileName, options.Profile, profileVideoDownscale, options.N64, options.Lz4Images, options.Lz4Videos)) {
+			!TryParseProfile(options.ProfileName, options.Profile, profileVideoDownscale, options.N64, options.Lz4Images, options.Lz4Videos,
+				options.HasEditor)) {
 			LOGE("Unknown target profile \"{}\"", options.ProfileName);
 			return false;
 		}
@@ -491,6 +526,18 @@ namespace
 				options.GameId = arg.exceptPrefix("--game-id="_s);
 			} else if (arg.hasPrefix("--title="_s)) {
 				options.Title = arg.exceptPrefix("--title="_s);
+			} else if (arg.hasPrefix("--iterations="_s)) {
+				options.Fuzz.Iterations = std::max<std::int32_t>(std::atoi(String(arg.exceptPrefix("--iterations="_s)).data()), 1);
+			} else if (arg.hasPrefix("--seed="_s)) {
+				options.Fuzz.Seed = std::uint64_t(std::strtoull(String(arg.exceptPrefix("--seed="_s)).data(), nullptr, 10));
+			} else if (arg.hasPrefix("--timeout="_s)) {
+				options.Fuzz.TimeoutSeconds = std::max<std::int32_t>(std::atoi(String(arg.exceptPrefix("--timeout="_s)).data()), 1);
+			} else if (arg.hasPrefix("--memory-limit="_s)) {
+				options.Fuzz.MemoryLimitMegabytes = std::max<std::int32_t>(std::atoi(String(arg.exceptPrefix("--memory-limit="_s)).data()), 64);
+			} else if (arg == "--focus-level-texts"_s) {
+				options.Fuzz.FocusLevelTexts = true;
+			} else if (arg == "--sweep-truncated"_s) {
+				options.SweepTruncated = true;
 			} else if (arg == "--help"_s || arg == "-h"_s) {
 				return false;
 			} else if (options.SourcePath.empty()) {
@@ -508,7 +555,7 @@ namespace
 		// because there is no sensible reading in which the tool converts two different source directories.
 		if (options.Action == Command::Convert && !options.SourceOverride.empty()) {
 			if (options.TargetPath.empty()) {
-				options.TargetPath = std::move(options.SourcePath);
+				options.TargetPath = Death::move(options.SourcePath);
 				options.SourcePath = String{};
 			} else if (!options.SourcePath.empty()) {
 				LOGE("A source directory and \"--source=\" were both given, which name the same thing");
@@ -538,6 +585,12 @@ namespace
 		}
 		if (options.Action == Command::VerifyFormats) {
 			return !options.SourcePath.empty() && options.TargetPath.empty();
+		}
+		if (options.Action == Command::FuzzFormats) {
+			if (options.TargetPath.empty()) {
+				options.TargetPath = "FuzzFindings"_s;
+			}
+			return !options.SourcePath.empty();
 		}
 		// The only command that rewrites what it is given, so it is also the only one whose target is optional
 		if (options.Action == Command::SwapDiscContent) {
@@ -570,11 +623,11 @@ namespace
 		// that has them at the top is taken as they are
 		String nested = fs::FindPathCaseInsensitive(fs::CombinePath(sourcePath, "Source"_s));
 		if (fs::DirectoryExists(nested) && fs::IsReadableFile(FindAnimsFile(nested))) {
-			layout.OriginalsPath = std::move(nested);
+			layout.OriginalsPath = Death::move(nested);
 
 			String content = fs::FindPathCaseInsensitive(fs::CombinePath(sourcePath, "Content"_s));
 			if (fs::DirectoryExists(content)) {
-				layout.ContentPath = std::move(content);
+				layout.ContentPath = Death::move(content);
 			}
 		} else {
 			layout.OriginalsPath = sourcePath;
@@ -584,13 +637,16 @@ namespace
 	}
 
 	/**
-		@brief Copies a directory tree, adding to whatever is already at the target
+		@brief Copies the game's own content, adding to whatever is already at the target
 
-		@param skippedNames			Entries of the top level that are not copied at all
-		@param skippedExtensions	Extensions, lower-case and without the dot, that are not copied at any level
+		What @ref AssetPacker::ContentFilter leaves out for the target isn't copied.
+
+		@param packedDirectories	Entries of the top level that go into the package instead, so aren't copied either
+		@param hasEditor			Whether the build the content is for has the level editor
+		@param isTopLevel			Whether @p sourcePath is the root of the content
 	*/
-	bool CopyDirectoryRecursive(StringView sourcePath, StringView targetPath, ArrayView<const StringView> skippedNames = {},
-		ArrayView<const StringView> skippedExtensions = {})
+	bool CopyContentDirectory(StringView sourcePath, StringView targetPath, ArrayView<const StringView> packedDirectories,
+		bool hasEditor, bool isTopLevel = true)
 	{
 		if (!fs::CreateDirectories(targetPath)) {
 			return false;
@@ -599,36 +655,25 @@ namespace
 		bool success = true;
 		for (auto item : fs::Directory(sourcePath)) {
 			StringView itemName = fs::GetFileName(item);
-			bool skipped = false;
-			for (StringView skippedName : skippedNames) {
-				if (itemName == skippedName) {
-					skipped = true;
+			const bool isDirectory = fs::DirectoryExists(item);
+			if (AssetPacker::ContentFilter::IsLeftOut(itemName, isDirectory, isTopLevel, hasEditor)) {
+				continue;
+			}
+			bool packed = false;
+			for (StringView packedDirectory : packedDirectories) {
+				if (itemName == packedDirectory) {
+					packed = true;
 					break;
 				}
 			}
-			if (skipped) {
+			if (packed) {
 				continue;
 			}
 
 			String targetItem = fs::CombinePath(targetPath, itemName);
-			if (fs::DirectoryExists(item)) {
-				// The name filter names top-level entries and so does not descend, the extension filter applies
-				// to the tree as a whole - the files it is meant for are one level down
-				success &= CopyDirectoryRecursive(item, targetItem, {}, skippedExtensions);
+			if (isDirectory) {
+				success &= CopyContentDirectory(item, targetItem, {}, hasEditor, false);
 				continue;
-			}
-
-			if (!skippedExtensions.empty()) {
-				String extension = fs::GetExtension(item);
-				for (StringView skippedExtension : skippedExtensions) {
-					if (extension == skippedExtension) {
-						skipped = true;
-						break;
-					}
-				}
-				if (skipped) {
-					continue;
-				}
 			}
 
 			if (!fs::Copy(item, targetItem)) {
@@ -637,6 +682,32 @@ namespace
 			}
 		}
 		return success;
+	}
+
+	/** @brief Leaves the texts of the level editor out of the translations of a tree whose target has no editor */
+	void RemoveEditorTranslations(StringView contentPath)
+	{
+		String translationsPath = fs::FindPathCaseInsensitive(fs::CombinePath(contentPath, "Translations"_s));
+		if (!fs::DirectoryExists(translationsPath)) {
+			return;
+		}
+
+		std::int32_t totalRemoved = 0, fileCount = 0;
+		for (auto item : fs::Directory(translationsPath)) {
+			if (StringUtils::lowercase(fs::GetExtension(item)) != "mo"_s) {
+				continue;
+			}
+			std::int32_t removed = AssetPacker::TranslationFilter::RemoveContext(item, "editor"_s);
+			if (removed < 0) {
+				LOGW("Cannot read \"{}\" as a translation, it is kept as it is", item);
+			} else if (removed > 0) {
+				totalRemoved += removed;
+				fileCount++;
+			}
+		}
+		if (totalRemoved > 0) {
+			LOGI("Left {} texts of the level editor out of {} translations", totalRemoved, fileCount);
+		}
 	}
 
 	/**
@@ -768,18 +839,15 @@ namespace
 		// Everything else the tree carries is read as a loose file and has to stay one.
 		static const StringView PackedContentDirectories[] = { "Animations"_s, "Metadata"_s };
 
-		// The ".po" files beside the translations are the sources the ".mo" the game reads are compiled from, and
-		// nothing loads one at run time - both the language list and the About section's translator credits
-		// require the ".mo" extension. They are larger than the ".mo" they produce, so a tree that is deployed as
-		// it is, onto a memory card or a disc that cannot be rewritten, is better off without them.
-		static const StringView SkippedContentExtensions[] = { "po"_s };
-
 		// The game's own content (fonts, animations, metadata, translations) is not derived from anything in the
 		// original data, so a target that has to be self-contained needs it carried over alongside
 		const bool selfContained = (!layout.ContentPath.empty() && options.Profile != TargetProfile::Desktop);
 		if (selfContained) {
 			LOGI("Copying \"{}\"...", layout.ContentPath);
-			CopyDirectoryRecursive(layout.ContentPath, outputPath, PackedContentDirectories, SkippedContentExtensions);
+			CopyContentDirectory(layout.ContentPath, outputPath, PackedContentDirectories, options.HasEditor);
+			if (!options.HasEditor) {
+				RemoveEditorTranslations(outputPath);
+			}
 		}
 
 		// A tree that is loaded as it is gets the package name the game recognizes as "already converted", so it
@@ -812,7 +880,7 @@ namespace
 			} else if (!n64Tools.BuiltIn && n64Tools.VideoConv.empty()) {
 				LOGI("videoconv64, ffmpeg or ffprobe is missing, so the cinematics are encoded by the tool itself");
 			}
-			n64TempPath = fs::CombinePath(outputPath, ".n64-temp"_s);
+			n64TempPath = fs::CombinePath(outputPath, AssetPacker::ContentFilter::N64TempDirectory);
 			fs::RemoveDirectoryRecursive(n64TempPath);
 			fs::CreateDirectories(n64TempPath);
 			n64TempPak = fs::CombinePath(n64TempPath, "Content.pak"_s);
@@ -1055,7 +1123,16 @@ namespace
 					}
 					break;
 				case Command::VerifyFormats:
-					success = AssetPacker::FormatVerifier::VerifyDirectory(options.SourcePath);
+					success = AssetPacker::FormatVerifier::VerifyDirectory(options.SourcePath, options.SweepTruncated);
+					break;
+				case Command::FuzzFormats:
+					success = AssetPacker::FormatVerifier::FuzzDirectory(options.SourcePath, options.TargetPath, options.Fuzz);
+					break;
+				case Command::LevelToText:
+					success = AssetPacker::LevelText::LevelToText(options.SourcePath, options.TargetPath);
+					break;
+				case Command::TextToLevel:
+					success = AssetPacker::LevelText::TextToLevel(options.SourcePath, options.TargetPath);
 					break;
 				case Command::ConvertMusic:
 					success = AssetPacker::ModuleConverter::ConvertJ2bToXm(options.SourcePath, options.TargetPath);

@@ -3,10 +3,14 @@
 
 #if defined(WITH_EDITOR)
 
-#include "../EditorSession.h"
+#include "TextPrompt.h"
+#include "../Tools/EditorContext.h"
+#include "../Common/TileSource.h"
 #include "../Document/Commands.h"
+#include "../Files/AtomicFile.h"
 #include "../Files/ContentTileSetLibrary.h"
 #include "../Imaging/PaletteMatch.h"
+#include "../Imaging/TileMasks.h"
 #include "../UI/UiDialogs.h"
 #include "../UI/UiMenu.h"
 #include "../UI/UiSurface.h"
@@ -40,34 +44,28 @@ namespace Jazz2::Editor
 		bool GetSourceTileSet(const LevelDocument& document, std::uint8_t source, String& name, std::int32_t& offset,
 			const Formats::ExtraTileSetRecord*& extra)
 		{
-			extra = nullptr;
-			if (source == TileRef::DefaultTileSet) {
-				name = document.Properties.DefaultTileSet;
-				offset = 0;
-				return !name.empty();
-			}
-			std::int32_t slot = std::int32_t(source) - 1;
-			if (source > TileRef::LastExtraTileSet || slot >= std::int32_t(document.ExtraTileSets.size())) {
+			TileSource resolved;
+			if (!ResolveTileSource(document, source, resolved)) {
+				extra = nullptr;
 				return false;
 			}
-			extra = &document.ExtraTileSets[slot];
-			name = extra->Name;
-			offset = extra->Offset;
-			return true;
+			name = resolved.Name;
+			offset = resolved.Offset;
+			extra = resolved.Extra;
+			// The default tile set has to have a name, an extra one has its record
+			return (extra != nullptr || !name.empty());
 		}
 
 		// A name for the new tile set that isn't taken yet
-		String MakeNewName(StringView name)
+		String MakeNewName(const LevelDocument& document, std::uint8_t source)
 		{
-			String base = name + "-edited"_s;
-			if (base.size() > 32) {
-				base = String(base.prefix(32));
+			String name;
+			std::int32_t offset;
+			const Formats::ExtraTileSetRecord* extra;
+			if (IsLevelTileSet(document, source) || !GetSourceTileSet(document, source, name, offset, extra)) {
+				name = "level"_s;
 			}
-			String result = base;
-			for (std::int32_t i = 2; !ContentTileSetLibrary::FindTileSetFile(result).empty() && i < 100; i++) {
-				result = base + "-"_s + String(std::to_string(i).c_str());
-			}
-			return result;
+			return SuggestTileSetName(name, "-edited"_s);
 		}
 
 		// Indices of the level palette as they're stored in the file of an extra tile set remapped to it: the first
@@ -80,24 +78,21 @@ namespace Jazz2::Editor
 				found[extra.Remapping[f]] = true;
 			}
 			inverse[0] = 0;
+			// The colors the indices of the file show, the lowest one of equally close ones is taken
+			std::uint32_t filePalette[256];
+			for (std::int32_t f = 0; f < 256; f++) {
+				filePalette[f] = palette[extra.Remapping[f]];
+			}
+			PaletteSearch search(filePalette);
 			for (std::int32_t i = 1; i < 256; i++) {
-				if (found[i]) {
-					continue;
-				}
-				OkLab color = OkLab::FromPaletteEntry(palette[i]);
-				float bestDistance = -1.0f;
-				for (std::int32_t f = 1; f < 256; f++) {
-					float distance = color.DistanceSquared(OkLab::FromPaletteEntry(palette[extra.Remapping[f]]));
-					if (bestDistance < 0.0f || distance < bestDistance) {
-						bestDistance = distance;
-						inverse[i] = std::uint8_t(f);
-					}
+				if (!found[i]) {
+					inverse[i] = search.FindNearest(OkLab::FromPaletteEntry(palette[i]));
 				}
 			}
 		}
 	}
 
-	std::int32_t CountChangedTiles(EditorSession& session, std::uint8_t source)
+	std::int32_t CountChangedTiles(IEditorContext& session, std::uint8_t source)
 	{
 		const LevelDocument& document = session.GetDocument();
 		SmallVector<std::uint16_t, 0> tiles;
@@ -116,12 +111,12 @@ namespace Jazz2::Editor
 		return std::int32_t(std::unique(tiles.begin(), tiles.end()) - tiles.begin());
 	}
 
-	static bool HasLevelPalette(EditorSession& session)
+	static bool HasLevelPalette(IEditorContext& session)
 	{
 		return ((session.GetDocument().Flags & LevelFlags::UseLevelPalette) == LevelFlags::UseLevelPalette);
 	}
 
-	bool ApplyTileChanges(EditorSession& session, std::uint8_t source, StringView newName, bool withPalette)
+	bool ApplyTileChanges(IEditorContext& session, std::uint8_t source, StringView newName, bool withPalette)
 	{
 		LevelDocument& document = session.GetDocument();
 		String name;
@@ -134,18 +129,18 @@ namespace Jazz2::Editor
 		String targetName = (intoItself ? name : String(newName));
 		if (!intoItself) {
 			if (!ContentTileSetLibrary::IsValidName(targetName)) {
-				session.ShowMessage(_("A tile set is named by lowercase letters, digits, dashes and underscores"));
+				session.ShowMessage(_x("editor", "A tile set is named by lowercase letters, digits, dashes and underscores"));
 				return false;
 			}
 			if (!ContentTileSetLibrary::FindTileSetFile(targetName).empty()) {
-				session.ShowMessage(_("A tile set of this name exists already"));
+				session.ShowMessage(_x("editor", "A tile set of this name exists already"));
 				return false;
 			}
 		}
 
 		Formats::TileSetData tileSet;
 		if (!ReadTileSetOf(session, source, tileSet)) {
-			session.ShowMessage(_("The tile set can't be read"));
+			session.ShowMessage(_x("editor", "The tile set can't be read"));
 			return false;
 		}
 		// The tiles the level stores in itself are changed there, a new tile set gets a file of its own
@@ -201,13 +196,7 @@ namespace Jazz2::Editor
 				continue;
 			}
 			// One byte a pixel in the level, one bit in the tile set
-			std::uint8_t* mask = &tileSet.Masks[std::size_t(fileTile) * Formats::TileSetData::MaskBytesPerTile];
-			std::memset(mask, 0, Formats::TileSetData::MaskBytesPerTile);
-			for (std::int32_t p = 0; p < 32 * 32; p++) {
-				if (tile.Mask[p] != 0) {
-					mask[p / 8] |= std::uint8_t(1 << (p % 8));
-				}
-			}
+			TileMasks::Pack(tile.Mask, &tileSet.Masks[std::size_t(fileTile) * Formats::TileSetData::MaskBytesPerTile]);
 			applied.push_back(tile.TileId);
 		}
 
@@ -218,7 +207,7 @@ namespace Jazz2::Editor
 			tileSet.Palette[0] &= 0x00FFFFFFu;
 		}
 		if (applied.empty() && !paletteApplied) {
-			session.ShowMessage(_("This level doesn't change any tile of the tile set"));
+			session.ShowMessage(_x("editor", "This level doesn't change any tile of the tile set"));
 			return false;
 		}
 
@@ -226,23 +215,24 @@ namespace Jazz2::Editor
 		String path;
 		if (intoLevel) {
 			if (!SerializeTileSet(tileSet, bytes)) {
-				session.ShowMessage(_("The tile set couldn't be saved"));
+				session.ShowMessage(_x("editor", "The tile set couldn't be saved"));
 				return false;
 			}
 		} else {
-			path = ContentTileSetLibrary::GetWritablePath(targetName, true);
-			if (path.empty()) {
-				session.ShowMessage(_("There's no place to save tile sets to"));
+			// The name of the tile set comes from the level, it must not lead out of where tile sets are saved to
+			if (!Formats::LevelFile::IsSafeTileSetPath(targetName)) {
+				session.ShowMessage(_x("editor", "The tile set has a name that can't be saved"));
 				return false;
 			}
-			// Written next to it first, so a tile set that can't be saved whole isn't lost
-			String tempPath = path + ".tmp"_s;
-			auto s = fs::Open(tempPath, FileAccess::Write);
-			bool written = (s->IsValid() && Formats::TileSetFile::Write(*s, tileSet));
-			s = nullptr;
-			if (!written || !fs::Move(tempPath, path)) {
-				fs::RemoveFile(tempPath);
-				session.ShowMessage(_("The tile set couldn't be saved"));
+			path = ContentTileSetLibrary::GetWritablePath(targetName, true);
+			if (path.empty()) {
+				session.ShowMessage(_x("editor", "There's no place to save tile sets to"));
+				return false;
+			}
+			// Written next to it first, so a tile set that can't be saved whole isn't lost, the one written over is kept
+			// as a backup, undo doesn't change the file back
+			if (!AtomicFile::Write(path, [&tileSet](Stream& s) { return Formats::TileSetFile::Write(s, tileSet); }, intoItself)) {
+				session.ShowMessage(_x("editor", "The tile set couldn't be saved"));
 				return false;
 			}
 			session.InvalidateTileSet(targetName);
@@ -258,48 +248,49 @@ namespace Jazz2::Editor
 		if ((!intoItself && source == TileRef::DefaultTileSet) || paletteApplied) {
 			parts |= SnapshotParts::Properties;
 		}
-		auto command = SnapshotCommand::Begin(document, parts, _("Save tile changes into tile set"));
-		if (intoLevel) {
-			document.ExtraTileSets[std::size_t(source) - 1].Data = std::move(bytes);
-		} else if (!intoItself) {
-			if (source == TileRef::DefaultTileSet) {
-				document.Properties.DefaultTileSet = targetName;
-			} else {
-				// The tiles the level had in itself are in the file now
-				Formats::ExtraTileSetRecord& record = document.ExtraTileSets[std::size_t(source) - 1];
-				record.Name = targetName;
-				record.Flags &= ~Formats::ExtraTileSetRecord::Embedded;
-				record.Data.clear();
+		// TRANSLATORS: Name of an undo step in the history
+		session.RecordSnapshotStep(_x("editor", "Save tile changes into tile set"), parts, [&](LevelDocument& document) {
+			if (intoLevel) {
+				document.ExtraTileSets[std::size_t(source) - 1].Data = Death::move(bytes);
+			} else if (!intoItself) {
+				if (source == TileRef::DefaultTileSet) {
+					document.Properties.DefaultTileSet = targetName;
+				} else {
+					// The tiles the level had in itself are in the file now
+					Formats::ExtraTileSetRecord& record = document.ExtraTileSets[std::size_t(source) - 1];
+					record.Name = targetName;
+					record.Flags &= ~Formats::ExtraTileSetRecord::Embedded;
+					record.Data.clear();
+				}
 			}
-		}
-		if (paletteApplied) {
-			// The tile set has it now
-			document.Flags = (document.Flags & ~LevelFlags::UseLevelPalette);
-		}
-		auto isApplied = [&applied](std::uint16_t tileId) {
-			return std::binary_search(applied.begin(), applied.end(), tileId);
-		};
-		auto& diffuse = document.DiffuseOverrides;
-		diffuse.erase(std::remove_if(diffuse.begin(), diffuse.end(), [&](const Formats::TileDiffuseOverride& tile) { return isApplied(tile.TileId); }), diffuse.end());
-		auto& masks = document.MaskOverrides;
-		masks.erase(std::remove_if(masks.begin(), masks.end(), [&](const Formats::TileMaskOverride& tile) { return isApplied(tile.TileId); }), masks.end());
-		DocumentChanges changes;
-		command->End(document, changes);
-		session.Execute(std::move(command));
+			if (paletteApplied) {
+				// The tile set has it now
+				document.Flags = (document.Flags & ~LevelFlags::UseLevelPalette);
+			}
+			auto isApplied = [&applied](std::uint16_t tileId) {
+				return std::binary_search(applied.begin(), applied.end(), tileId);
+			};
+			auto& diffuse = document.DiffuseOverrides;
+			diffuse.erase(std::remove_if(diffuse.begin(), diffuse.end(), [&](const Formats::TileDiffuseOverride& tile) { return isApplied(tile.TileId); }), diffuse.end());
+			auto& masks = document.MaskOverrides;
+			masks.erase(std::remove_if(masks.begin(), masks.end(), [&](const Formats::TileMaskOverride& tile) { return isApplied(tile.TileId); }), masks.end());
+			return true;
+		});
 
 		if (tiles == 0) {
-			session.ShowMessage(_f("The palette of the level was saved into tile set \"{}\"", targetName));
+			session.ShowMessage(_fx("editor", "The palette of the level was saved into tile set \"{}\"", targetName));
 		} else {
-			String message = _fn("{} changed tile was saved into tile set \"{}\"", "{} changed tiles were saved into tile set \"{}\"", tiles, tiles, targetName);
+			String message = _fnx("editor", "{} changed tile was saved into tile set \"{}\"", "{} changed tiles were saved into tile set \"{}\"", tiles, tiles, targetName);
 			if (paletteApplied) {
-				message += " "_s + _("- and the palette of the level");
+				// TRANSLATORS: Added to the end of the message about how many changed tiles were saved into a tile set
+				message += " "_s + _x("editor", "- and the palette of the level");
 			}
 			session.ShowMessage(message);
 		}
 		return true;
 	}
 
-	void ShowApplyTileChangesDialog(EditorSession& session, std::int32_t source)
+	void ShowApplyTileChangesDialog(IEditorContext& session, std::int32_t source)
 	{
 		UiSurface* surface = session.GetSurface();
 		if (surface == nullptr) {
@@ -324,11 +315,11 @@ namespace Jazz2::Editor
 			}
 		}
 		if (state->Source < 0) {
-			session.ShowMessage(_("This level doesn't change any tile or have a palette of its own"));
+			session.ShowMessage(_x("editor", "This level doesn't change any tile or have a palette of its own"));
 			return;
 		}
 
-		EditorSession* s = &session;
+		IEditorContext* s = &session;
 		auto sourceName = [s](std::int32_t source) {
 			String name;
 			std::int32_t offset;
@@ -337,57 +328,86 @@ namespace Jazz2::Editor
 			return GetTileSetLabel(name);
 		};
 
-		auto dialog = std::make_unique<UiDialog>(_("Save Tile Changes into Tile Set"));
+		// TRANSLATORS: Title of the dialog that saves the tiles changed in the level into a tile set
+		auto dialog = std::make_unique<UiDialog>(_x("editor", "Save Tile Changes into Tile Set"));
 		UiDialog* dialogPtr = dialog.get();
 		auto* content = dialog->GetContent()->Add<UiForm>(UiTheme::Spacing);
-		content->Add<UiLabel>(_("The tiles changed in this level become tiles of a tile set,"), UiTheme::TextDim);
-		content->Add<UiLabel>(_("the level doesn't change them anymore."), UiTheme::TextDim);
+		// TRANSLATORS: First line of a sentence in the Save Tile Changes into Tile Set dialog, the next text continues it
+		content->Add<UiLabel>(_x("editor", "The tiles changed in this level become tiles of a tile set,"), UiTheme::TextDim);
+		// TRANSLATORS: Second line of a sentence in the Save Tile Changes into Tile Set dialog, continues the previous text
+		content->Add<UiLabel>(_x("editor", "the level doesn't change them anymore."), UiTheme::TextDim);
+		// The name of the new tile set follows the tile set chosen
+		auto nameHolder = std::make_shared<UiTextBox*>(nullptr);
 		{
-			auto* row = content->AddRow(_("Tiles of"));
+			// TRANSLATORS: Label of the choice of the tile set whose changed tiles are saved, followed by its name
+			auto* row = content->AddRow(_x("editor", "Tiles of"));
 			auto* dropdown = row->Add<UiDropdown>([state, sourceName]() {
 				return sourceName(state->Source);
-			}, [s, state, sourceName, sourceCount](SmallVectorImpl<UiMenuEntry>& entries) {
+			}, [s, state, sourceName, sourceCount, nameHolder](SmallVectorImpl<UiMenuEntry>& entries) {
 				for (std::int32_t i = 0; i < sourceCount; i++) {
 					std::int32_t changed = CountChangedTiles(*s, std::uint8_t(i));
 					if (changed <= 0 && !(i == TileRef::DefaultTileSet && HasLevelPalette(*s))) {
 						continue;
 					}
 					UiMenuEntry entry;
-					entry.Label = sourceName(i) + " ("_s + _fn("{} changed tile", "{} changed tiles", changed, changed) + ")"_s;
+					// TRANSLATORS: Number of the tiles the level changes in a tile set, shown after the name of the tile set
+					entry.Label = sourceName(i) + " ("_s + _fnx("editor", "{} changed tile", "{} changed tiles", changed, changed) + ")"_s;
 					entry.IsChecked = [state, i]() { return (state->Source == i); };
-					entry.Execute = [state, i]() { state->Source = i; };
-					entries.push_back(std::move(entry));
+					entry.Execute = [s, state, i, nameHolder]() {
+						if (state->Source != i && *nameHolder != nullptr) {
+							(*nameHolder)->Text = MakeNewName(s->GetDocument(), std::uint8_t(i));
+						}
+						state->Source = i;
+					};
+					entries.push_back(Death::move(entry));
 				}
 			});
 			dropdown->Width = 160.0f;
 			auto* count = row->Add<UiLabel>(StringView(), UiTheme::TextDim);
-			count->TextFunc = [s, state]() {
-				std::int32_t changed = CountChangedTiles(*s, std::uint8_t(state->Source));
-				return String(_fn("{} changed tile", "{} changed tiles", changed, changed));
+			// Counted again only when the level or the tile set chosen changes, not every frame
+			struct CountCache
+			{
+				std::uint32_t Revision = ~0u;
+				std::int32_t Source = -1;
+				String Text;
+			};
+			auto cache = std::make_shared<CountCache>();
+			count->TextFunc = [s, state, cache]() {
+				std::uint32_t revision = s->GetHistory().GetRevision();
+				if (cache->Revision != revision || cache->Source != state->Source) {
+					cache->Revision = revision;
+					cache->Source = state->Source;
+					std::int32_t changed = CountChangedTiles(*s, std::uint8_t(state->Source));
+					cache->Text = _fnx("editor", "{} changed tile", "{} changed tiles", changed, changed);
+				}
+				return cache->Text;
 			};
 		}
 		{
-			auto* withPalette = content->Add<UiCheckBox>(_("With the palette of the level"), [state]() { return state->WithPalette; },
+			// TRANSLATORS: Checkbox in the Save Tile Changes into Tile Set dialog, the palette of the level is saved into the tile set too
+			auto* withPalette = content->Add<UiCheckBox>(_x("editor", "With the palette of the level"), [state]() { return state->WithPalette; },
 				[state](bool value) { state->WithPalette = value; });
-			withPalette->Tooltip = _("It becomes the palette of the tile set, the level then doesn't have its own");
+			withPalette->Tooltip = _x("editor", "It becomes the palette of the tile set, the level then doesn't have its own");
 			withPalette->IsVisibleFunc = [s, state]() { return (state->Source == TileRef::DefaultTileSet && HasLevelPalette(*s)); };
 		}
 		UiTextBox* nameBox;
 		{
-			content->Add<UiCheckBox>(_("Into a new tile set, this level then uses it instead"), [state]() { return !state->IntoItself; },
+			content->Add<UiCheckBox>(_x("editor", "Into a new tile set, this level then uses it instead"), [state]() { return !state->IntoItself; },
 				[state](bool value) { state->IntoItself = !value; });
-			auto* row = content->AddRow(_("Name"));
-			nameBox = row->Add<UiTextBox>(MakeNewName(IsLevelTileSet(document, std::uint8_t(state->Source)) ? StringView("level"_s) : StringView(sourceName(state->Source))));
+			// TRANSLATORS: Label of the name of the new tile set in the Save Tile Changes into Tile Set dialog
+			auto* row = content->AddRow(_x("editor", "Name"));
+			nameBox = row->Add<UiTextBox>(MakeNewName(document, std::uint8_t(state->Source)));
+			*nameHolder = nameBox;
 			nameBox->Width = 160.0f;
 			nameBox->MaxLength = 32;
-			nameBox->Tooltip = _("The tile set is saved in the user content, Tilesets/<name>.j2t");
+			nameBox->Tooltip = _x("editor", "The tile set is saved in the user content, Tilesets/<name>.j2t");
 			nameBox->IsEnabledFunc = [state]() { return !state->IntoItself; };
 		}
 		{
 			auto* warning = content->Add<UiLabel>(StringView(), UiTheme::TextAccent);
 			warning->TextFunc = [s, state]() {
 				return (state->IntoItself && !IsLevelTileSet(s->GetDocument(), std::uint8_t(state->Source))
-					? String(_("Every level that uses the tile set shows the changes")) : String());
+					? String(_x("editor", "Every level that uses the tile set shows the changes")) : String());
 			};
 			// Its own copy in the user content is written over, any other one is covered by a copy there
 			auto* copy = content->Add<UiLabel>(StringView(), UiTheme::TextAccent);
@@ -396,8 +416,8 @@ namespace Jazz2::Editor
 					return String();
 				}
 				String name = sourceName(state->Source);
-				bool ownCopy = (ContentTileSetLibrary::FindTileSetFile(name) == ContentTileSetLibrary::GetWritablePath(name, false));
-				return (state->IntoItself && !ownCopy ? String(_("- a copy in the user content is used instead of it")) : String());
+				// TRANSLATORS: Warning in the Save Tile Changes into Tile Set dialog, the changed tile set is saved as a copy in the user content
+				return (state->IntoItself && !IsOwnTileSetCopy(name) ? String(_x("editor", "- a copy in the user content is used instead of it")) : String());
 			};
 		}
 
@@ -407,13 +427,9 @@ namespace Jazz2::Editor
 				dialogPtr->Close();
 			}
 		}, true);
-		dialog->AddButton(_("Cancel"), [dialogPtr]() { dialogPtr->Close(); });
+		dialog->AddButton(_x("editor", "Cancel"), [dialogPtr]() { dialogPtr->Close(); });
 
-		UiOverlayOptions options;
-		options.Centered = true;
-		options.Modal = true;
-		options.CloseOnOutsideClick = false;
-		surface->PushOverlay(std::move(dialog), std::move(options));
+		ShowModal(*surface, Death::move(dialog));
 	}
 }
 

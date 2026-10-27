@@ -41,6 +41,7 @@ namespace Jazz2::UI::Menu
 			return;
 		}
 
+		// TRANSLATORS: Header of Options > Gameplay > Language section
 		SetTitle(_("Language"));
 
 		auto& resolver = ContentResolver::Get();
@@ -94,6 +95,6 @@ namespace Jazz2::UI::Menu
 		}
 
 		list->SetSelectedIndex(selectedIndex);
-		SetContent(std::move(list));
+		SetContent(Death::move(list));
 	}
 }

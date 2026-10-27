@@ -1899,6 +1899,108 @@ void ShieldLightning_Fragment(const nCine::RHI::Software::FragmentShaderInput& i
 	packColor(COLOR, in.rgba);
 }
 
+		// --- SingleColor ---
+struct SingleColor_Uniforms
+{
+};
+
+void SingleColor_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const SingleColor_Uniforms* unis = static_cast<const SingleColor_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	vec4 src = swTexturePrimary(in, 0);
+	float alpha = src.a;
+	COLOR = vec4(COLOR.r, COLOR.g, COLOR.b, alpha * COLOR.a);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- SingleColor_USE_PALETTE ---
+struct SingleColor_USE_PALETTE_Uniforms
+{
+	float vPaletteOffset;
+};
+
+void SingleColor_USE_PALETTE_ComputeVaryings(void* inputs, const std::uint8_t* instanceBlock)
+{
+	using namespace nCine::RHI::Software::sw;
+	SingleColor_USE_PALETTE_Uniforms* io = static_cast<SingleColor_USE_PALETTE_Uniforms*>(inputs);
+	(void)io;
+	(void)instanceBlock;
+	io->vPaletteOffset = (*reinterpret_cast<const float*>(instanceBlock + 104));
+}
+
+void SingleColor_USE_PALETTE_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const SingleColor_USE_PALETTE_Uniforms* unis = static_cast<const SingleColor_USE_PALETTE_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	vec4 src = swTexturePrimary(in, 0);
+	float palIndex = floor(unis->vPaletteOffset + 0.5f) + floor(src.r * 255.0f + 0.5f);
+	float palX = (mod(palIndex, 256.0f) + 0.5f) / 256.0f;
+	float palY = (floor(palIndex / 256.0f) + 0.5f) / 256.0f;
+	float alpha = swTexture(in, 1, vec2(palX, palY)).a * src.a;
+	COLOR = vec4(COLOR.r, COLOR.g, COLOR.b, alpha * COLOR.a);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- BatchedSingleColor ---
+struct BatchedSingleColor_Uniforms
+{
+};
+
+void BatchedSingleColor_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const BatchedSingleColor_Uniforms* unis = static_cast<const BatchedSingleColor_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	vec4 src = swTexturePrimary(in, 0);
+	float alpha = src.a;
+	COLOR = vec4(COLOR.r, COLOR.g, COLOR.b, alpha * COLOR.a);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- BatchedSingleColor_USE_PALETTE ---
+struct BatchedSingleColor_USE_PALETTE_Uniforms
+{
+	float vPaletteOffset;
+};
+
+void BatchedSingleColor_USE_PALETTE_ComputeVaryings(void* inputs, const std::uint8_t* instanceBlock)
+{
+	using namespace nCine::RHI::Software::sw;
+	BatchedSingleColor_USE_PALETTE_Uniforms* io = static_cast<BatchedSingleColor_USE_PALETTE_Uniforms*>(inputs);
+	(void)io;
+	(void)instanceBlock;
+	io->vPaletteOffset = (*reinterpret_cast<const float*>(instanceBlock + 104));
+}
+
+void BatchedSingleColor_USE_PALETTE_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const BatchedSingleColor_USE_PALETTE_Uniforms* unis = static_cast<const BatchedSingleColor_USE_PALETTE_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	vec4 src = swTexturePrimary(in, 0);
+	float palIndex = floor(unis->vPaletteOffset + 0.5f) + floor(src.r * 255.0f + 0.5f);
+	float palX = (mod(palIndex, 256.0f) + 0.5f) / 256.0f;
+	float palY = (floor(palIndex / 256.0f) + 0.5f) / 256.0f;
+	float alpha = swTexture(in, 1, vec2(palX, palY)).a * src.a;
+	COLOR = vec4(COLOR.r, COLOR.g, COLOR.b, alpha * COLOR.a);
+	packColor(COLOR, in.rgba);
+}
+
 		// --- TexturedBackground ---
 struct TexturedBackground_Uniforms
 {
@@ -1906,7 +2008,25 @@ struct TexturedBackground_Uniforms
 	nCine::RHI::Software::sw::vec2 uCameraPos;
 	nCine::RHI::Software::sw::vec4 uHorizonColor;
 	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
 };
+
+static nCine::RHI::Software::sw::vec3 TexturedBackground_legacyWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_Uniforms* unis = static_cast<const TexturedBackground_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	float horizonY = clamp(0.5f + unis->uHorizonOffset.y, 0.0f, 1.0f);
+	float aboveHorizon = uv.y <= horizonY ? 1.0f : 0.0f;
+	float fromHorizon = aboveHorizon > 0.5f ? (horizonY - uv.y) / max(horizonY, 0.0001f) : (uv.y - horizonY) / max(1.0f - horizonY, 0.0001f);
+	float distance = 1.3f - fromHorizon;
+	float horizonDepth = distance;
+	float correction = unis->uViewSize.x * 9.0f / (unis->uViewSize.y * 16.0f);
+	vec2 texturePos = vec2(unis->uShift.x / 256.0f + (uv.x - 0.5f - unis->uHorizonOffset.x) * (0.5f + 1.5f * horizonDepth) * correction, unis->uShift.y / 256.0f + (2.0f * aboveHorizon - 1.0f) * 0.5f * (1.0f - fromHorizon) * 1.4f * distance);
+	float horizonOpacity = clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
 
 void TexturedBackground_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
 {
@@ -1915,16 +2035,15 @@ void TexturedBackground_Fragment(const nCine::RHI::Software::FragmentShaderInput
 	(void)unis;
 	(void)in;
 	vec4 COLOR;
-	float distance = 1.3f - abs(2.0f * vec2(in.u, in.v).y - 1.0f);
-	float horizonDepth = distance;
-	float yShift = vec2(in.u, in.v).y > 0.5f ? 1.0f : 0.0f;
-	float correction = unis->uViewSize.x * 9.0f / (unis->uViewSize.y * 16.0f);
-	vec2 texturePos = vec2(unis->uShift.x / 256.0f + (vec2(in.u, in.v).x - 0.5f) * (0.5f + 1.5f * horizonDepth) * correction, unis->uShift.y / 256.0f + (vec2(in.u, in.v).y - yShift) * 1.4f * distance);
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_legacyWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
 	vec4 texColor = swTexture(in, 0, texturePos);
-	float horizonOpacity = clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	float horizonOpacity = warp.z;
 	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
-	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity);
-	COLOR.a = 1.0f;
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
 	packColor(COLOR, in.rgba);
 }
 
@@ -1935,7 +2054,25 @@ struct TexturedBackground_DITHER_Uniforms
 	nCine::RHI::Software::sw::vec2 uCameraPos;
 	nCine::RHI::Software::sw::vec4 uHorizonColor;
 	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
 };
+
+static nCine::RHI::Software::sw::vec3 TexturedBackground_DITHER_legacyWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_DITHER_Uniforms* unis = static_cast<const TexturedBackground_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	float horizonY = clamp(0.5f + unis->uHorizonOffset.y, 0.0f, 1.0f);
+	float aboveHorizon = uv.y <= horizonY ? 1.0f : 0.0f;
+	float fromHorizon = aboveHorizon > 0.5f ? (horizonY - uv.y) / max(horizonY, 0.0001f) : (uv.y - horizonY) / max(1.0f - horizonY, 0.0001f);
+	float distance = 1.3f - fromHorizon;
+	float horizonDepth = distance;
+	float correction = unis->uViewSize.x * 9.0f / (unis->uViewSize.y * 16.0f);
+	vec2 texturePos = vec2(unis->uShift.x / 256.0f + (uv.x - 0.5f - unis->uHorizonOffset.x) * (0.5f + 1.5f * horizonDepth) * correction, unis->uShift.y / 256.0f + (2.0f * aboveHorizon - 1.0f) * 0.5f * (1.0f - fromHorizon) * 1.4f * distance);
+	float horizonOpacity = clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
 
 void TexturedBackground_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
 {
@@ -1944,74 +2081,753 @@ void TexturedBackground_DITHER_Fragment(const nCine::RHI::Software::FragmentShad
 	(void)unis;
 	(void)in;
 	vec4 COLOR;
-	float distance = 1.3f - abs(2.0f * vec2(in.u, in.v).y - 1.0f);
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_DITHER_legacyWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = warp.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackground_KEYED ---
+struct TexturedBackground_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackground_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_KEYED_Uniforms* unis = static_cast<const TexturedBackground_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+static nCine::RHI::Software::sw::vec3 TexturedBackground_KEYED_legacyWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_KEYED_Uniforms* unis = static_cast<const TexturedBackground_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	float horizonY = clamp(0.5f + unis->uHorizonOffset.y, 0.0f, 1.0f);
+	float aboveHorizon = uv.y <= horizonY ? 1.0f : 0.0f;
+	float fromHorizon = aboveHorizon > 0.5f ? (horizonY - uv.y) / max(horizonY, 0.0001f) : (uv.y - horizonY) / max(1.0f - horizonY, 0.0001f);
+	float distance = 1.3f - fromHorizon;
 	float horizonDepth = distance;
-	float yShift = vec2(in.u, in.v).y > 0.5f ? 1.0f : 0.0f;
 	float correction = unis->uViewSize.x * 9.0f / (unis->uViewSize.y * 16.0f);
-	vec2 texturePos = vec2(unis->uShift.x / 256.0f + (vec2(in.u, in.v).x - 0.5f) * (0.5f + 1.5f * horizonDepth) * correction, unis->uShift.y / 256.0f + (vec2(in.u, in.v).y - yShift) * 1.4f * distance);
-	vec4 texColor = swTexture(in, 0, texturePos);
+	vec2 texturePos = vec2(unis->uShift.x / 256.0f + (uv.x - 0.5f - unis->uHorizonOffset.x) * (0.5f + 1.5f * horizonDepth) * correction, unis->uShift.y / 256.0f + (2.0f * aboveHorizon - 1.0f) * 0.5f * (1.0f - fromHorizon) * 1.4f * distance);
 	float horizonOpacity = clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
+
+void TexturedBackground_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_KEYED_Uniforms* unis = static_cast<const TexturedBackground_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_KEYED_legacyWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = warp.z;
 	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
-	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity);
-	COLOR.a = 1.0f;
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR.a = TexturedBackground_KEYED_keyedOpacity(in);
 	packColor(COLOR, in.rgba);
 }
 
-		// --- TexturedBackgroundCircle ---
-struct TexturedBackgroundCircle_Uniforms
+		// --- TexturedBackground_PLUS ---
+struct TexturedBackground_PLUS_Uniforms
 {
 	nCine::RHI::Software::sw::vec2 uViewSize;
 	nCine::RHI::Software::sw::vec2 uCameraPos;
 	nCine::RHI::Software::sw::vec4 uHorizonColor;
 	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
 };
 
-void TexturedBackgroundCircle_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+static nCine::RHI::Software::sw::vec3 TexturedBackground_PLUS_plusWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
 {
 	using namespace nCine::RHI::Software::sw;
-	const TexturedBackgroundCircle_Uniforms* unis = static_cast<const TexturedBackgroundCircle_Uniforms*>(in.userData);
+	const TexturedBackground_PLUS_Uniforms* unis = static_cast<const TexturedBackground_PLUS_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 pixel = uv * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor((0.5f + unis->uHorizonOffset.y) * unis->uViewSize.y);
+	float below = step(0.0f, row);
+	float distance = abs(row) + 8.0f;
+	vec2 texel = vec2(unis->uShift.x + (pixel.x - (0.5f + unis->uHorizonOffset.x) * unis->uViewSize.x) * 60.0f / distance, unis->uShift.y + 128.0f + (1.0f - 2.0f * below) * 15360.0f / distance);
+	float rows = row / 141.0f;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(1.0f - rows * rows, 0.0f, 1.0f));
+}
+
+void TexturedBackground_PLUS_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_PLUS_Uniforms* unis = static_cast<const TexturedBackground_PLUS_Uniforms*>(in.userData);
 	(void)unis;
 	(void)in;
 	vec4 COLOR;
-	vec2 targetCoord = vec2(2.0f) * vec2(in.u, in.v) - vec2(1.0f);
-	targetCoord.x *= unis->uViewSize.x / unis->uViewSize.y;
-	float distance = length(targetCoord);
-	float xShift = targetCoord.x == 0.0f ? sign(targetCoord.y) * 0.5f : atan(targetCoord.y, targetCoord.x) * 0.31830988618379067153776752675f;
-	vec2 texturePos = vec2(xShift * 1.0f + unis->uShift.x * 0.01f, 1.0f / distance * 1.4f + unis->uShift.y * 0.002f);
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_PLUS_plusWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
 	vec4 texColor = swTexture(in, 0, texturePos);
-	float horizonOpacity = 1.0f - clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	float horizonOpacity = warp.z;
 	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
-	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity);
-	COLOR.a = 1.0f;
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
 	packColor(COLOR, in.rgba);
 }
 
-		// --- TexturedBackgroundCircle_DITHER ---
-struct TexturedBackgroundCircle_DITHER_Uniforms
+		// --- TexturedBackground_PLUS_DITHER ---
+struct TexturedBackground_PLUS_DITHER_Uniforms
 {
 	nCine::RHI::Software::sw::vec2 uViewSize;
 	nCine::RHI::Software::sw::vec2 uCameraPos;
 	nCine::RHI::Software::sw::vec4 uHorizonColor;
 	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
 };
 
-void TexturedBackgroundCircle_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+static nCine::RHI::Software::sw::vec3 TexturedBackground_PLUS_DITHER_plusWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
 {
 	using namespace nCine::RHI::Software::sw;
-	const TexturedBackgroundCircle_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundCircle_DITHER_Uniforms*>(in.userData);
+	const TexturedBackground_PLUS_DITHER_Uniforms* unis = static_cast<const TexturedBackground_PLUS_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 pixel = uv * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor((0.5f + unis->uHorizonOffset.y) * unis->uViewSize.y);
+	float below = step(0.0f, row);
+	float distance = abs(row) + 8.0f;
+	vec2 texel = vec2(unis->uShift.x + (pixel.x - (0.5f + unis->uHorizonOffset.x) * unis->uViewSize.x) * 60.0f / distance, unis->uShift.y + 128.0f + (1.0f - 2.0f * below) * 15360.0f / distance);
+	float rows = row / 141.0f;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(1.0f - rows * rows, 0.0f, 1.0f));
+}
+
+void TexturedBackground_PLUS_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_PLUS_DITHER_Uniforms* unis = static_cast<const TexturedBackground_PLUS_DITHER_Uniforms*>(in.userData);
 	(void)unis;
 	(void)in;
 	vec4 COLOR;
-	vec2 targetCoord = vec2(2.0f) * vec2(in.u, in.v) - vec2(1.0f);
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_PLUS_DITHER_plusWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = warp.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackground_PLUS_KEYED ---
+struct TexturedBackground_PLUS_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uHorizonOffset;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackground_PLUS_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackground_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+static nCine::RHI::Software::sw::vec3 TexturedBackground_PLUS_KEYED_plusWarp(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackground_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 pixel = uv * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor((0.5f + unis->uHorizonOffset.y) * unis->uViewSize.y);
+	float below = step(0.0f, row);
+	float distance = abs(row) + 8.0f;
+	vec2 texel = vec2(unis->uShift.x + (pixel.x - (0.5f + unis->uHorizonOffset.x) * unis->uViewSize.x) * 60.0f / distance, unis->uShift.y + 128.0f + (1.0f - 2.0f * below) * 15360.0f / distance);
+	float rows = row / 141.0f;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(1.0f - rows * rows, 0.0f, 1.0f));
+}
+
+void TexturedBackground_PLUS_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackground_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackground_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 warp = TexturedBackground_PLUS_KEYED_plusWarp(in, vec2(in.u, in.v));
+	vec2 texturePos = warp.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = warp.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * (1.0f - unis->uHorizonOffset.z));
+	COLOR.a = TexturedBackground_PLUS_KEYED_keyedOpacity(in);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundCylinder ---
+struct TexturedBackgroundCylinder_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uCylinder;
+};
+
+void TexturedBackgroundCylinder_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundCylinder_Uniforms* unis = static_cast<const TexturedBackgroundCylinder_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec2 pixel = vec2(in.u, in.v) * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor(unis->uCylinder.y * unis->uViewSize.y);
+	float rowCos = cos(3.14159265359f * row / unis->uViewSize.y);
+	float halfSize = step(0.5f, unis->uCylinder.w);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + (pixel.x - unis->uCylinder.x * unis->uViewSize.x) * mix(128.0f * (2.0f + rowCos), 256.0f * (1.0f + 2.0f * rowCos), halfSize) / unis->uViewSize.x, unis->uShift.y + 128.0f + 128.0f * halfSize + (pixel.y - 0.5f * unis->uViewSize.y) * (256.0f + 256.0f * halfSize) / unis->uViewSize.y);
+	float rows = row / 141.0f;
+	float fade = clamp(1.0f - rows * rows, 0.0f, 1.0f) * 0.65f;
+	vec2 texturePos = vec2(texel.x / 256.0f, 1.0f - texel.y / 256.0f);
+	vec4 texColor = swTexture(in, 0, texturePos);
+	COLOR = mix(texColor, vec4(unis->uHorizonColor.xyz(), 1.0f), fade * unis->uCylinder.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundCylinder_DITHER ---
+struct TexturedBackgroundCylinder_DITHER_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uCylinder;
+};
+
+void TexturedBackgroundCylinder_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundCylinder_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundCylinder_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec2 pixel = vec2(in.u, in.v) * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor(unis->uCylinder.y * unis->uViewSize.y);
+	float rowCos = cos(3.14159265359f * row / unis->uViewSize.y);
+	float halfSize = step(0.5f, unis->uCylinder.w);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + (pixel.x - unis->uCylinder.x * unis->uViewSize.x) * mix(128.0f * (2.0f + rowCos), 256.0f * (1.0f + 2.0f * rowCos), halfSize) / unis->uViewSize.x, unis->uShift.y + 128.0f + 128.0f * halfSize + (pixel.y - 0.5f * unis->uViewSize.y) * (256.0f + 256.0f * halfSize) / unis->uViewSize.y);
+	float rows = row / 141.0f;
+	float fade = clamp(1.0f - rows * rows, 0.0f, 1.0f) * 0.65f;
+	vec2 texturePos = vec2(texel.x / 256.0f, 1.0f - texel.y / 256.0f);
+	vec4 texColor = swTexture(in, 0, texturePos);
+	COLOR = mix(texColor, vec4(unis->uHorizonColor.xyz(), 1.0f), fade * unis->uCylinder.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundCylinder_KEYED ---
+struct TexturedBackgroundCylinder_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uCylinder;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackgroundCylinder_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundCylinder_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundCylinder_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+void TexturedBackgroundCylinder_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundCylinder_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundCylinder_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec2 pixel = vec2(in.u, in.v) * unis->uViewSize - vec2(0.5f);
+	float row = pixel.y - floor(unis->uCylinder.y * unis->uViewSize.y);
+	float rowCos = cos(3.14159265359f * row / unis->uViewSize.y);
+	float halfSize = step(0.5f, unis->uCylinder.w);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + (pixel.x - unis->uCylinder.x * unis->uViewSize.x) * mix(128.0f * (2.0f + rowCos), 256.0f * (1.0f + 2.0f * rowCos), halfSize) / unis->uViewSize.x, unis->uShift.y + 128.0f + 128.0f * halfSize + (pixel.y - 0.5f * unis->uViewSize.y) * (256.0f + 256.0f * halfSize) / unis->uViewSize.y);
+	float rows = row / 141.0f;
+	float fade = clamp(1.0f - rows * rows, 0.0f, 1.0f) * 0.65f;
+	vec2 texturePos = vec2(texel.x / 256.0f, 1.0f - texel.y / 256.0f);
+	vec4 texColor = swTexture(in, 0, texturePos);
+	COLOR = mix(texColor, vec4(unis->uHorizonColor.xyz(), 1.0f), fade * unis->uCylinder.z);
+	COLOR.a = TexturedBackgroundCylinder_KEYED_keyedOpacity(in);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundReflection ---
+struct TexturedBackgroundReflection_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec4 uQuad;
+	nCine::RHI::Software::sw::vec4 uHorizon;
+	nCine::RHI::Software::sw::vec4 uShift;
+	nCine::RHI::Software::sw::vec4 uTint;
+	float uBlur;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+};
+
+static float TexturedBackgroundReflection_paletteIndex(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 texturePos)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundReflection_Uniforms* unis = static_cast<const TexturedBackgroundReflection_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 texel = swTexture(in, 0, texturePos * unis->uShift.zw());
+	return floor(max(texel.r, max(texel.g, texel.b)) * 255.0f + 0.5f);
+}
+
+static float TexturedBackgroundReflection_truncateTowardZero(const nCine::RHI::Software::FragmentShaderInput& in, float value)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundReflection_Uniforms* unis = static_cast<const TexturedBackgroundReflection_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return sign(value) * floor(abs(value) + 0.001f);
+}
+
+void TexturedBackgroundReflection_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundReflection_Uniforms* unis = static_cast<const TexturedBackgroundReflection_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	float horizon = unis->uHorizon.x;
+	float viewRow = unis->uQuad.y + vec2(in.u, in.v).y * unis->uQuad.w;
+	float rows = viewRow - horizon;
+	float column = unis->uQuad.x + vec2(in.u, in.v).x * unis->uQuad.z - unis->uHorizon.y;
+	float planeRows = max(rows, 0.0f) + unis->uHorizon.z * 0.5f;
+	float depth = unis->uHorizon.z / planeRows;
+	vec2 texturePos = vec2(column * depth, -depth * 330.0f) * 0.5f + unis->uShift.xy();
+	float rippleY = TexturedBackgroundReflection_paletteIndex(in, texturePos) - TexturedBackgroundReflection_paletteIndex(in, texturePos + vec2(0.0f, 128.0f));
+	float rippleX = TexturedBackgroundReflection_paletteIndex(in, texturePos + vec2(-64.0f, 64.0f)) - TexturedBackgroundReflection_paletteIndex(in, texturePos + vec2(64.0f, 64.0f));
+	float row = floor(max(rows, 0.0f));
+	float nearHorizon = 0.0625f * (1.0f + step(1.0f, row)) * (1.0f + step(3.0f, row)) * (1.0f + step(7.0f, row)) * (1.0f + step(15.0f, row));
+	float scale = floor(unis->uHorizon.w * 255.0f + 0.5f) / 32.0f * nearHorizon * 0.6f;
+	float movedY = min(TexturedBackgroundReflection_truncateTowardZero(in, rippleY * scale), max(row - 1.0f, 0.0f));
+	float movedX = TexturedBackgroundReflection_truncateTowardZero(in, rippleX * scale);
+	vec2 viewToUv = vec2(1.0f) / unis->uViewSize;
+	float pixelsPerRow = viewToUv.y / unis->uTargetSizeInv.y;
+	float pixelsPerColumn = viewToUv.x / unis->uTargetSizeInv.x;
+	vec2 uv = vec2(unis->uQuad.x + vec2(in.u, in.v).x * unis->uQuad.z, viewRow) * viewToUv;
+	float mirroredRows = 2.0f * row - movedY;
+	vec2 mirroredUv = vec2(uv.x - floor(movedX * pixelsPerColumn + 0.5f) * unis->uTargetSizeInv.x, uv.y - floor(mirroredRows * pixelsPerRow + 0.5f) * unis->uTargetSizeInv.y);
+	float topRowUv = uv.y - viewRow * viewToUv.y + 0.5f * unis->uTargetSizeInv.y;
+	mirroredUv.y = max(mirroredUv.y, topRowUv);
+	vec3 color = swTexture(in, 2, mirroredUv).rgb();
+	if (unis->uBlur > 0.0f) {
+		vec2 blurStep = vec2(unis->uTargetSizeInv.x * 1.5f, 0.0f);
+		color = (color * 2.0f + swTexture(in, 2, mirroredUv - blurStep).rgb() * 2.0f + swTexture(in, 2, mirroredUv + blurStep).rgb() * 2.0f + swTexture(in, 2, mirroredUv - blurStep * 2.0f).rgb() + swTexture(in, 2, mirroredUv + blurStep * 2.0f).rgb()) * 0.125f;
+	}
+	color *= step(0.5f, horizon);
+	COLOR = vec4(mix(color, unis->uTint.rgb(), unis->uTint.a), 1.0f);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel ---
+struct TexturedBackgroundTunnel_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+};
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_legacyTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 targetCoord = vec2(2.0f) * uv - vec2(2.0f) * unis->uTunnel.xy();
 	targetCoord.x *= unis->uViewSize.x / unis->uViewSize.y;
 	float distance = length(targetCoord);
 	float xShift = targetCoord.x == 0.0f ? sign(targetCoord.y) * 0.5f : atan(targetCoord.y, targetCoord.x) * 0.31830988618379067153776752675f;
-	vec2 texturePos = vec2(xShift * 1.0f + unis->uShift.x * 0.01f, 1.0f / distance * 1.4f + unis->uShift.y * 0.002f);
-	vec4 texColor = swTexture(in, 0, texturePos);
+	float depth = 1.0f / distance * 1.4f;
+	vec2 texturePos = vec2(xShift * 1.0f + unis->uShift.x * 0.01f + (unis->uTunnel.w > 0.0f ? depth * 0.5f : 0.0f), depth + unis->uShift.y * 0.002f);
 	float horizonOpacity = 1.0f - clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
+
+void TexturedBackgroundTunnel_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_legacyTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
 	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
-	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity);
-	COLOR.a = 1.0f;
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel_DITHER ---
+struct TexturedBackgroundTunnel_DITHER_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+};
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_DITHER_legacyTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 targetCoord = vec2(2.0f) * uv - vec2(2.0f) * unis->uTunnel.xy();
+	targetCoord.x *= unis->uViewSize.x / unis->uViewSize.y;
+	float distance = length(targetCoord);
+	float xShift = targetCoord.x == 0.0f ? sign(targetCoord.y) * 0.5f : atan(targetCoord.y, targetCoord.x) * 0.31830988618379067153776752675f;
+	float depth = 1.0f / distance * 1.4f;
+	vec2 texturePos = vec2(xShift * 1.0f + unis->uShift.x * 0.01f + (unis->uTunnel.w > 0.0f ? depth * 0.5f : 0.0f), depth + unis->uShift.y * 0.002f);
+	float horizonOpacity = 1.0f - clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
+
+void TexturedBackgroundTunnel_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_DITHER_legacyTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel_KEYED ---
+struct TexturedBackgroundTunnel_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackgroundTunnel_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_KEYED_legacyTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 targetCoord = vec2(2.0f) * uv - vec2(2.0f) * unis->uTunnel.xy();
+	targetCoord.x *= unis->uViewSize.x / unis->uViewSize.y;
+	float distance = length(targetCoord);
+	float xShift = targetCoord.x == 0.0f ? sign(targetCoord.y) * 0.5f : atan(targetCoord.y, targetCoord.x) * 0.31830988618379067153776752675f;
+	float depth = 1.0f / distance * 1.4f;
+	vec2 texturePos = vec2(xShift * 1.0f + unis->uShift.x * 0.01f + (unis->uTunnel.w > 0.0f ? depth * 0.5f : 0.0f), depth + unis->uShift.y * 0.002f);
+	float horizonOpacity = 1.0f - clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+	return vec3(texturePos, horizonOpacity);
+}
+
+void TexturedBackgroundTunnel_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_KEYED_legacyTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR.a = TexturedBackgroundTunnel_KEYED_keyedOpacity(in);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel_PLUS ---
+struct TexturedBackgroundTunnel_PLUS_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+};
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_PLUS_plusTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 fromCenter = uv * unis->uViewSize - vec2(0.5f) - vec2(unis->uTunnel.x * unis->uViewSize.x, floor(unis->uTunnel.y * unis->uViewSize.y));
+	float radius = max(length(fromCenter), 0.5f);
+	float angle = fromCenter.x == 0.0f ? sign(fromCenter.y) * 1.5707963f : atan(fromCenter.y, fromCenter.x);
+	float logRadius = log2(radius);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + 64.0f + angle * (128.0f * 0.31830988618379067153776752675f) + (unis->uTunnel.w > 0.0f ? 356.2f * exp2(-0.15f * logRadius) + -91.0f : 0.0f), unis->uShift.y - 256.0f * logRadius);
+	float fade = 87.0f / radius;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(fade * fade - 0.0414f, 0.0f, 1.0f));
+}
+
+void TexturedBackgroundTunnel_PLUS_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_PLUS_plusTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel_PLUS_DITHER ---
+struct TexturedBackgroundTunnel_PLUS_DITHER_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+};
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_PLUS_DITHER_plusTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 fromCenter = uv * unis->uViewSize - vec2(0.5f) - vec2(unis->uTunnel.x * unis->uViewSize.x, floor(unis->uTunnel.y * unis->uViewSize.y));
+	float radius = max(length(fromCenter), 0.5f);
+	float angle = fromCenter.x == 0.0f ? sign(fromCenter.y) * 1.5707963f : atan(fromCenter.y, fromCenter.x);
+	float logRadius = log2(radius);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + 64.0f + angle * (128.0f * 0.31830988618379067153776752675f) + (unis->uTunnel.w > 0.0f ? 356.2f * exp2(-0.15f * logRadius) + -91.0f : 0.0f), unis->uShift.y - 256.0f * logRadius);
+	float fade = 87.0f / radius;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(fade * fade - 0.0414f, 0.0f, 1.0f));
+}
+
+void TexturedBackgroundTunnel_PLUS_DITHER_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_DITHER_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_DITHER_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_PLUS_DITHER_plusTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR = vec4(COLOR.rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundTunnel_PLUS_KEYED ---
+struct TexturedBackgroundTunnel_PLUS_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uCameraPos;
+	nCine::RHI::Software::sw::vec4 uHorizonColor;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uTunnel;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackgroundTunnel_PLUS_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+static nCine::RHI::Software::sw::vec3 TexturedBackgroundTunnel_PLUS_KEYED_plusTunnel(const nCine::RHI::Software::FragmentShaderInput& in, nCine::RHI::Software::sw::vec2 uv)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec2 fromCenter = uv * unis->uViewSize - vec2(0.5f) - vec2(unis->uTunnel.x * unis->uViewSize.x, floor(unis->uTunnel.y * unis->uViewSize.y));
+	float radius = max(length(fromCenter), 0.5f);
+	float angle = fromCenter.x == 0.0f ? sign(fromCenter.y) * 1.5707963f : atan(fromCenter.y, fromCenter.x);
+	float logRadius = log2(radius);
+	vec2 texel = vec2(unis->uShift.x * 0.25f + 64.0f + angle * (128.0f * 0.31830988618379067153776752675f) + (unis->uTunnel.w > 0.0f ? 356.2f * exp2(-0.15f * logRadius) + -91.0f : 0.0f), unis->uShift.y - 256.0f * logRadius);
+	float fade = 87.0f / radius;
+	return vec3(texel.x / 256.0f, 1.0f - texel.y / 256.0f, clamp(fade * fade - 0.0414f, 0.0f, 1.0f));
+}
+
+void TexturedBackgroundTunnel_PLUS_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundTunnel_PLUS_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec3 tunnel = TexturedBackgroundTunnel_PLUS_KEYED_plusTunnel(in, vec2(in.u, in.v));
+	vec2 texturePos = tunnel.xy();
+	vec4 texColor = swTexture(in, 0, texturePos);
+	float horizonOpacity = tunnel.z;
+	vec4 horizonColorWithStars = vec4(unis->uHorizonColor.xyz(), 1.0f);
+	COLOR = mix(texColor, horizonColorWithStars, horizonOpacity * unis->uTunnel.z);
+	COLOR.a = TexturedBackgroundTunnel_PLUS_KEYED_keyedOpacity(in);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundWave ---
+struct TexturedBackgroundWave_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uWave;
+	nCine::RHI::Software::sw::vec2 uWavePhase;
+};
+
+void TexturedBackgroundWave_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundWave_Uniforms* unis = static_cast<const TexturedBackgroundWave_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec2 pos = mod(floor(unis->uShift + vec2(in.u, in.v) * unis->uViewSize), 256.0f);
+	vec2 moved = floor(unis->uWave.xy() * vec2(cos(6.28318530718f * (pos.y * unis->uWave.z + unis->uWavePhase.x)), sin(6.28318530718f * (pos.x * unis->uWave.w + unis->uWavePhase.y))));
+	vec2 texel = mod(pos + moved, 256.0f);
+	vec2 texturePos = vec2((texel.x + 0.5f) / 256.0f, 1.0f - (texel.y + 0.5f) / 256.0f);
+	COLOR = vec4(swTexture(in, 0, texturePos).rgb() * opacity, opacity);
+	packColor(COLOR, in.rgba);
+}
+
+		// --- TexturedBackgroundWave_KEYED ---
+struct TexturedBackgroundWave_KEYED_Uniforms
+{
+	nCine::RHI::Software::sw::vec2 uViewSize;
+	nCine::RHI::Software::sw::vec2 uShift;
+	nCine::RHI::Software::sw::vec4 uWave;
+	nCine::RHI::Software::sw::vec2 uWavePhase;
+	nCine::RHI::Software::sw::vec2 uTargetSizeInv;
+	nCine::RHI::Software::sw::vec4 uKeyColor;
+	float uOpacity;
+};
+
+static float TexturedBackgroundWave_KEYED_keyedOpacity(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundWave_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundWave_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	return unis->uOpacity;
+}
+
+void TexturedBackgroundWave_KEYED_Fragment(const nCine::RHI::Software::FragmentShaderInput& in)
+{
+	using namespace nCine::RHI::Software::sw;
+	const TexturedBackgroundWave_KEYED_Uniforms* unis = static_cast<const TexturedBackgroundWave_KEYED_Uniforms*>(in.userData);
+	(void)unis;
+	(void)in;
+	vec4 COLOR;
+	COLOR = vec4(in.color[0], in.color[1], in.color[2], in.color[3]);
+	float opacity = COLOR.a;
+	vec2 pos = mod(floor(unis->uShift + vec2(in.u, in.v) * unis->uViewSize), 256.0f);
+	vec2 moved = floor(unis->uWave.xy() * vec2(cos(6.28318530718f * (pos.y * unis->uWave.z + unis->uWavePhase.x)), sin(6.28318530718f * (pos.x * unis->uWave.w + unis->uWavePhase.y))));
+	vec2 texel = mod(pos + moved, 256.0f);
+	vec2 texturePos = vec2((texel.x + 0.5f) / 256.0f, 1.0f - (texel.y + 0.5f) / 256.0f);
+	COLOR = vec4(swTexture(in, 0, texturePos).rgb(), TexturedBackgroundWave_KEYED_keyedOpacity(in));
 	packColor(COLOR, in.rgba);
 }
 
@@ -2364,24 +3180,144 @@ void BatchedWhiteMask_USE_PALETTE_Fragment(const nCine::RHI::Software::FragmentS
 			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_Uniforms, uCameraPos), 2 },
 			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_Uniforms, uHorizonColor), 4 },
 			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_Uniforms, uHorizonOffset), 4 },
 		};
 		const SwGeneratedUniformField TexturedBackground_DITHER_Fields[] = {
 			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackground_DITHER_Uniforms, uViewSize), 2 },
 			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_DITHER_Uniforms, uCameraPos), 2 },
 			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_DITHER_Uniforms, uHorizonColor), 4 },
 			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_DITHER_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_DITHER_Uniforms, uHorizonOffset), 4 },
 		};
-		const SwGeneratedUniformField TexturedBackgroundCircle_Fields[] = {
-			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundCircle_Uniforms, uViewSize), 2 },
-			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundCircle_Uniforms, uCameraPos), 2 },
-			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundCircle_Uniforms, uHorizonColor), 4 },
-			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundCircle_Uniforms, uShift), 2 },
+		const SwGeneratedUniformField TexturedBackground_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uHorizonOffset), 4 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackground_KEYED_Uniforms, uOpacity), 1 },
 		};
-		const SwGeneratedUniformField TexturedBackgroundCircle_DITHER_Fields[] = {
-			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundCircle_DITHER_Uniforms, uViewSize), 2 },
-			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundCircle_DITHER_Uniforms, uCameraPos), 2 },
-			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundCircle_DITHER_Uniforms, uHorizonColor), 4 },
-			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundCircle_DITHER_Uniforms, uShift), 2 },
+		const SwGeneratedUniformField TexturedBackground_PLUS_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackground_PLUS_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_PLUS_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_PLUS_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_PLUS_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_PLUS_Uniforms, uHorizonOffset), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackground_PLUS_DITHER_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackground_PLUS_DITHER_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_PLUS_DITHER_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_PLUS_DITHER_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_PLUS_DITHER_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_PLUS_DITHER_Uniforms, uHorizonOffset), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackground_PLUS_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uShift), 2 },
+			{ "uHorizonOffset", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uHorizonOffset), 4 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackground_PLUS_KEYED_Uniforms, uOpacity), 1 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundCylinder_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundCylinder_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundCylinder_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundCylinder_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundCylinder_Uniforms, uShift), 2 },
+			{ "uCylinder", (std::uint32_t)offsetof(TexturedBackgroundCylinder_Uniforms, uCylinder), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundCylinder_DITHER_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundCylinder_DITHER_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundCylinder_DITHER_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundCylinder_DITHER_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundCylinder_DITHER_Uniforms, uShift), 2 },
+			{ "uCylinder", (std::uint32_t)offsetof(TexturedBackgroundCylinder_DITHER_Uniforms, uCylinder), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundCylinder_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uShift), 2 },
+			{ "uCylinder", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uCylinder), 4 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackgroundCylinder_KEYED_Uniforms, uOpacity), 1 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundReflection_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uViewSize), 2 },
+			{ "uQuad", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uQuad), 4 },
+			{ "uHorizon", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uHorizon), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uShift), 4 },
+			{ "uTint", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uTint), 4 },
+			{ "uBlur", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uBlur), 1 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackgroundReflection_Uniforms, uTargetSizeInv), 2 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_Uniforms, uTunnel), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_DITHER_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_DITHER_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_DITHER_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_DITHER_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_DITHER_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_DITHER_Uniforms, uTunnel), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uTunnel), 4 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackgroundTunnel_KEYED_Uniforms, uOpacity), 1 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_PLUS_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_Uniforms, uTunnel), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_PLUS_DITHER_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms, uTunnel), 4 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundTunnel_PLUS_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uViewSize), 2 },
+			{ "uCameraPos", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uCameraPos), 2 },
+			{ "uHorizonColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uHorizonColor), 4 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uShift), 2 },
+			{ "uTunnel", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uTunnel), 4 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms, uOpacity), 1 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundWave_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundWave_Uniforms, uViewSize), 2 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundWave_Uniforms, uShift), 2 },
+			{ "uWave", (std::uint32_t)offsetof(TexturedBackgroundWave_Uniforms, uWave), 4 },
+			{ "uWavePhase", (std::uint32_t)offsetof(TexturedBackgroundWave_Uniforms, uWavePhase), 2 },
+		};
+		const SwGeneratedUniformField TexturedBackgroundWave_KEYED_Fields[] = {
+			{ "uViewSize", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uViewSize), 2 },
+			{ "uShift", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uShift), 2 },
+			{ "uWave", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uWave), 4 },
+			{ "uWavePhase", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uWavePhase), 2 },
+			{ "uTargetSizeInv", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uTargetSizeInv), 2 },
+			{ "uKeyColor", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uKeyColor), 4 },
+			{ "uOpacity", (std::uint32_t)offsetof(TexturedBackgroundWave_KEYED_Uniforms, uOpacity), 1 },
 		};
 
 		const SwGeneratedShaderInfo SwGeneratedShaders[] = {
@@ -2420,10 +3356,28 @@ void BatchedWhiteMask_USE_PALETTE_Fragment(const nCine::RHI::Software::FragmentS
 			{ "ResizeCrtShadowMask", &ResizeCrtShadowMask_Fragment, (std::uint32_t)sizeof(ResizeCrtShadowMask_Uniforms), nullptr, 0, &ResizeCrtShadowMask_ComputeVaryings },
 			{ "ShieldFire", &ShieldFire_Fragment, (std::uint32_t)sizeof(ShieldFire_Uniforms), nullptr, 0, &ShieldFire_ComputeVaryings },
 			{ "ShieldLightning", &ShieldLightning_Fragment, (std::uint32_t)sizeof(ShieldLightning_Uniforms), nullptr, 0, &ShieldLightning_ComputeVaryings },
-			{ "TexturedBackground", &TexturedBackground_Fragment, (std::uint32_t)sizeof(TexturedBackground_Uniforms), TexturedBackground_Fields, 4, nullptr },
-			{ "TexturedBackground_DITHER", &TexturedBackground_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackground_DITHER_Uniforms), TexturedBackground_DITHER_Fields, 4, nullptr },
-			{ "TexturedBackgroundCircle", &TexturedBackgroundCircle_Fragment, (std::uint32_t)sizeof(TexturedBackgroundCircle_Uniforms), TexturedBackgroundCircle_Fields, 4, nullptr },
-			{ "TexturedBackgroundCircle_DITHER", &TexturedBackgroundCircle_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackgroundCircle_DITHER_Uniforms), TexturedBackgroundCircle_DITHER_Fields, 4, nullptr },
+			{ "SingleColor", &SingleColor_Fragment, (std::uint32_t)sizeof(SingleColor_Uniforms), nullptr, 0, nullptr },
+			{ "SingleColor_USE_PALETTE", &SingleColor_USE_PALETTE_Fragment, (std::uint32_t)sizeof(SingleColor_USE_PALETTE_Uniforms), nullptr, 0, &SingleColor_USE_PALETTE_ComputeVaryings },
+			{ "BatchedSingleColor", &BatchedSingleColor_Fragment, (std::uint32_t)sizeof(BatchedSingleColor_Uniforms), nullptr, 0, nullptr },
+			{ "BatchedSingleColor_USE_PALETTE", &BatchedSingleColor_USE_PALETTE_Fragment, (std::uint32_t)sizeof(BatchedSingleColor_USE_PALETTE_Uniforms), nullptr, 0, &BatchedSingleColor_USE_PALETTE_ComputeVaryings },
+			{ "TexturedBackground", &TexturedBackground_Fragment, (std::uint32_t)sizeof(TexturedBackground_Uniforms), TexturedBackground_Fields, 5, nullptr },
+			{ "TexturedBackground_DITHER", &TexturedBackground_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackground_DITHER_Uniforms), TexturedBackground_DITHER_Fields, 5, nullptr },
+			{ "TexturedBackground_KEYED", &TexturedBackground_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackground_KEYED_Uniforms), TexturedBackground_KEYED_Fields, 8, nullptr },
+			{ "TexturedBackground_PLUS", &TexturedBackground_PLUS_Fragment, (std::uint32_t)sizeof(TexturedBackground_PLUS_Uniforms), TexturedBackground_PLUS_Fields, 5, nullptr },
+			{ "TexturedBackground_PLUS_DITHER", &TexturedBackground_PLUS_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackground_PLUS_DITHER_Uniforms), TexturedBackground_PLUS_DITHER_Fields, 5, nullptr },
+			{ "TexturedBackground_PLUS_KEYED", &TexturedBackground_PLUS_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackground_PLUS_KEYED_Uniforms), TexturedBackground_PLUS_KEYED_Fields, 8, nullptr },
+			{ "TexturedBackgroundCylinder", &TexturedBackgroundCylinder_Fragment, (std::uint32_t)sizeof(TexturedBackgroundCylinder_Uniforms), TexturedBackgroundCylinder_Fields, 5, nullptr },
+			{ "TexturedBackgroundCylinder_DITHER", &TexturedBackgroundCylinder_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackgroundCylinder_DITHER_Uniforms), TexturedBackgroundCylinder_DITHER_Fields, 5, nullptr },
+			{ "TexturedBackgroundCylinder_KEYED", &TexturedBackgroundCylinder_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackgroundCylinder_KEYED_Uniforms), TexturedBackgroundCylinder_KEYED_Fields, 8, nullptr },
+			{ "TexturedBackgroundReflection", &TexturedBackgroundReflection_Fragment, (std::uint32_t)sizeof(TexturedBackgroundReflection_Uniforms), TexturedBackgroundReflection_Fields, 7, nullptr },
+			{ "TexturedBackgroundTunnel", &TexturedBackgroundTunnel_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_Uniforms), TexturedBackgroundTunnel_Fields, 5, nullptr },
+			{ "TexturedBackgroundTunnel_DITHER", &TexturedBackgroundTunnel_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_DITHER_Uniforms), TexturedBackgroundTunnel_DITHER_Fields, 5, nullptr },
+			{ "TexturedBackgroundTunnel_KEYED", &TexturedBackgroundTunnel_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_KEYED_Uniforms), TexturedBackgroundTunnel_KEYED_Fields, 8, nullptr },
+			{ "TexturedBackgroundTunnel_PLUS", &TexturedBackgroundTunnel_PLUS_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_PLUS_Uniforms), TexturedBackgroundTunnel_PLUS_Fields, 5, nullptr },
+			{ "TexturedBackgroundTunnel_PLUS_DITHER", &TexturedBackgroundTunnel_PLUS_DITHER_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_PLUS_DITHER_Uniforms), TexturedBackgroundTunnel_PLUS_DITHER_Fields, 5, nullptr },
+			{ "TexturedBackgroundTunnel_PLUS_KEYED", &TexturedBackgroundTunnel_PLUS_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackgroundTunnel_PLUS_KEYED_Uniforms), TexturedBackgroundTunnel_PLUS_KEYED_Fields, 8, nullptr },
+			{ "TexturedBackgroundWave", &TexturedBackgroundWave_Fragment, (std::uint32_t)sizeof(TexturedBackgroundWave_Uniforms), TexturedBackgroundWave_Fields, 4, nullptr },
+			{ "TexturedBackgroundWave_KEYED", &TexturedBackgroundWave_KEYED_Fragment, (std::uint32_t)sizeof(TexturedBackgroundWave_KEYED_Uniforms), TexturedBackgroundWave_KEYED_Fields, 7, nullptr },
 			{ "TileMapMesh", &TileMapMesh_Fragment, (std::uint32_t)sizeof(TileMapMesh_Uniforms), nullptr, 0, nullptr },
 			{ "Tinted", &Tinted_Fragment, (std::uint32_t)sizeof(Tinted_Uniforms), nullptr, 0, nullptr },
 			{ "Tinted_USE_PALETTE", &Tinted_USE_PALETTE_Fragment, (std::uint32_t)sizeof(Tinted_USE_PALETTE_Uniforms), nullptr, 0, &Tinted_USE_PALETTE_ComputeVaryings },

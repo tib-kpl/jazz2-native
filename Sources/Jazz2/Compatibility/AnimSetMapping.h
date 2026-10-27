@@ -48,7 +48,12 @@ namespace Jazz2::Compatibility
 		struct Entry {
 			/** @brief Category name */
 			String Category;
-			/** @brief Entry name */
+			/**
+			 * @brief Entry name
+			 *
+			 * Of a discarded entry, the path of the graphics of the game that show the item of the original instead
+			 * (`Category/Name`), or empty, see @ref DiscardItemAs().
+			 */
 			String Name;
 			/** @brief Sequential ordinal of the entry */
 			std::uint32_t Ordinal;
@@ -65,6 +70,8 @@ namespace Jazz2::Compatibility
 		Entry* Get(std::uint32_t set, std::uint32_t item);
 		/** @brief Returns the entry with the specified ordinal index, or `nullptr` if not found */
 		Entry* GetByOrdinal(std::uint32_t index);
+		/** @brief Returns the number of items of the specified set, also those that have no entry */
+		std::uint32_t GetItemCount(std::uint32_t set) const;
 
 		/** @brief Returns mapping of animations for the specified version */
 		static AnimSetMapping GetAnimMapping(JJ2Version version);
@@ -74,13 +81,19 @@ namespace Jazz2::Compatibility
 	private:
 		JJ2Version _version;
 		HashMap<std::uint32_t, Entry> _entries;
+		// Number of items of each set by the set, the items left out by SkipItems() count too
+		HashMap<std::uint32_t, std::uint32_t> _itemCounts;
 		std::uint32_t _currentItem;
 		std::uint32_t _currentSet;
 		std::uint32_t _currentOrdinal;
 
 		AnimSetMapping(JJ2Version version);
 
+		void UpdateItemCount();
+
 		void DiscardItems(std::uint32_t advanceBy, JJ2Version appliesTo = JJ2Version::All);
+		// Discards an item that the game draws with the graphics of another one, which scripts change when they change it
+		void DiscardItemAs(StringView category, StringView name);
 		void SkipItems(std::uint32_t advanceBy = 1);
 		void NextSet(std::uint32_t advanceBy = 1, JJ2Version appliesTo = JJ2Version::All);
 		void Add(JJ2Version appliesTo, StringView category, StringView name, JJ2DefaultPalette palette = JJ2DefaultPalette::Sprite, bool skipNormalMap = false, bool allowRealtimePalette = false);

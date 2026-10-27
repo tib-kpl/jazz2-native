@@ -28,8 +28,6 @@ layout (std140) uniform InstanceBlock
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture (added to the per-pixel index for the palette lookup). Lands in the
-	// std140 tail padding after spriteSize, so the block stays 112 bytes. Only read by palette shaders.
 	float palOffset;
 };
 
@@ -62,8 +60,6 @@ uniform mat4 uViewMatrix;
 	uniform vec4 color;
 	uniform vec4 texRect;
 	uniform vec2 spriteSize;
-	// Flat index into the palette texture (added to the per-pixel index for the palette lookup). Lands in the
-	// std140 tail padding after spriteSize, so the block stays 112 bytes. Only read by palette shaders.
 	uniform float palOffset;
 
 varying vec2 vTexCoords;
@@ -96,22 +92,10 @@ in vec4 vColor;
 in highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture(uTexture, uv);
-#ifdef USE_PALETTE
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	vec4 c = texture(uTexturePalette, vec2(palX, palY));
-	return vec4(c.rgb, c.a * src.a);
-#else
 	return src;
-#endif
 }
 
 out vec4 COLOR;
@@ -137,22 +121,10 @@ varying vec4 vColor;
 varying highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture2D(uTexture, uv);
-#ifdef USE_PALETTE
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	vec4 c = texture2D(uTexturePalette, vec2(palX, palY));
-	return vec4(c.rgb, c.a * src.a);
-#else
 	return src;
-#endif
 }
 
 
@@ -191,8 +163,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char WhiteMask_USE_PALETTE_Vs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
@@ -203,8 +174,6 @@ layout (std140) uniform InstanceBlock
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture (added to the per-pixel index for the palette lookup). Lands in the
-	// std140 tail padding after spriteSize, so the block stays 112 bytes. Only read by palette shaders.
 	float palOffset;
 };
 
@@ -228,7 +197,6 @@ void main()
 #if defined(WITH_RHI_GL) && defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char WhiteMask_USE_PALETTE_Vs100[] =
 R"__SHDR__(attribute vec2 aQuadCorner;
-#define USE_PALETTE (1)
 #line 1
 
 uniform mat4 uProjectionMatrix;
@@ -238,8 +206,6 @@ uniform mat4 uViewMatrix;
 	uniform vec4 color;
 	uniform vec4 texRect;
 	uniform vec2 spriteSize;
-	// Flat index into the palette texture (added to the per-pixel index for the palette lookup). Lands in the
-	// std140 tail padding after spriteSize, so the block stays 112 bytes. Only read by palette shaders.
 	uniform float palOffset;
 
 varying vec2 vTexCoords;
@@ -261,8 +227,7 @@ void main()
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char WhiteMask_USE_PALETTE_Fs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 #ifdef GL_ES
 precision mediump float;
@@ -273,22 +238,15 @@ in vec4 vColor;
 in highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture(uTexture, uv);
-#ifdef USE_PALETTE
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	vec4 c = texture(uTexturePalette, vec2(palX, palY));
 	return vec4(c.rgb, c.a * src.a);
-#else
-	return src;
-#endif
 }
 
 out vec4 COLOR;
@@ -305,8 +263,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char WhiteMask_USE_PALETTE_Fs100[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 precision mediump float;
 
@@ -315,22 +272,15 @@ varying vec4 vColor;
 varying highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture2D(uTexture, uv);
-#ifdef USE_PALETTE
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	vec4 c = texture2D(uTexturePalette, vec2(palX, palY));
 	return vec4(c.rgb, c.a * src.a);
-#else
-	return src;
-#endif
 }
 
 
@@ -444,14 +394,13 @@ struct Instance
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture; lands in the std140 tail padding, so the stride stays 112 bytes
 	float palOffset;
 };
 
 layout (std140) uniform InstancesBlock
 {
 #ifndef BATCH_SIZE
-	#define BATCH_SIZE (585) // 64 Kb / 112 b
+	#define BATCH_SIZE (585)
 #endif
 	Instance[BATCH_SIZE] instances;
 } block;
@@ -490,12 +439,11 @@ struct Instance
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture; lands in the std140 tail padding, so the stride stays 112 bytes
 	float palOffset;
 };
 
 #ifndef BATCH_SIZE
-	#define BATCH_SIZE (585) // 64 Kb / 112 b
+	#define BATCH_SIZE (585)
 #endif
 	uniform Instance instances[BATCH_SIZE];
 
@@ -531,22 +479,10 @@ in vec4 vColor;
 in highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture(uTexture, uv);
-#ifdef USE_PALETTE
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	vec4 c = texture(uTexturePalette, vec2(palX, palY));
-	return vec4(c.rgb, c.a * src.a);
-#else
 	return src;
-#endif
 }
 
 out vec4 COLOR;
@@ -572,22 +508,10 @@ varying vec4 vColor;
 varying highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
-uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture2D(uTexture, uv);
-#ifdef USE_PALETTE
-	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
-	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
-	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
-	vec4 c = texture2D(uTexturePalette, vec2(palX, palY));
-	return vec4(c.rgb, c.a * src.a);
-#else
 	return src;
-#endif
 }
 
 
@@ -622,8 +546,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char BatchedWhiteMask_USE_PALETTE_Vs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 uniform mat4 uProjectionMatrix;
 uniform mat4 uViewMatrix;
@@ -634,14 +557,13 @@ struct Instance
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture; lands in the std140 tail padding, so the stride stays 112 bytes
 	float palOffset;
 };
 
 layout (std140) uniform InstancesBlock
 {
 #ifndef BATCH_SIZE
-	#define BATCH_SIZE (585) // 64 Kb / 112 b
+	#define BATCH_SIZE (585)
 #endif
 	Instance[BATCH_SIZE] instances;
 } block;
@@ -669,7 +591,6 @@ void main()
 	inline constexpr char BatchedWhiteMask_USE_PALETTE_Vs100[] =
 R"__SHDR__(attribute vec2 aQuadCorner;
 attribute float aInstanceIndex;
-#define USE_PALETTE (1)
 #line 1
 
 uniform mat4 uProjectionMatrix;
@@ -681,12 +602,11 @@ struct Instance
 	vec4 color;
 	vec4 texRect;
 	vec2 spriteSize;
-	// Flat index into the palette texture; lands in the std140 tail padding, so the stride stays 112 bytes
 	float palOffset;
 };
 
 #ifndef BATCH_SIZE
-	#define BATCH_SIZE (585) // 64 Kb / 112 b
+	#define BATCH_SIZE (585)
 #endif
 	uniform Instance instances[BATCH_SIZE];
 
@@ -711,8 +631,7 @@ void main()
 
 #if defined(WITH_RHI_GL) && !defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char BatchedWhiteMask_USE_PALETTE_Fs[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 #ifdef GL_ES
 precision mediump float;
@@ -723,22 +642,15 @@ in vec4 vColor;
 in highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture(uTexture, uv);
-#ifdef USE_PALETTE
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	vec4 c = texture(uTexturePalette, vec2(palX, palY));
 	return vec4(c.rgb, c.a * src.a);
-#else
-	return src;
-#endif
 }
 
 out vec4 COLOR;
@@ -755,8 +667,7 @@ void main() {
 
 #if defined(WITH_RHI_GL) && defined(RHI_GL_PROFILE_ES2)
 	inline constexpr char BatchedWhiteMask_USE_PALETTE_Fs100[] =
-R"__SHDR__(#define USE_PALETTE (1)
-#line 1
+R"__SHDR__(#line 1
 
 precision mediump float;
 
@@ -765,22 +676,15 @@ varying vec4 vColor;
 varying highp float vPaletteOffset;
 
 uniform sampler2D uTexture;
-#ifdef USE_PALETTE
 uniform sampler2D uTexturePalette;
-#endif
 
-// Resolves the diffuse color, looking the palette index up in the palette texture when the sprite is indexed
 vec4 maskSample(vec2 uv) {
 	vec4 src = texture2D(uTexture, uv);
-#ifdef USE_PALETTE
 	highp float palIndex = floor(vPaletteOffset + 0.5) + floor(src.r * 255.0 + 0.5);
 	highp float palX = (mod(palIndex, 256.0) + 0.5) / 256.0;
 	highp float palY = (floor(palIndex / 256.0) + 0.5) / 256.0;
 	vec4 c = texture2D(uTexturePalette, vec2(palX, palY));
 	return vec4(c.rgb, c.a * src.a);
-#else
-	return src;
-#endif
 }
 
 

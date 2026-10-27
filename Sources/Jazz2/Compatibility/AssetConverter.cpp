@@ -7,6 +7,14 @@
 #include "JJ2Strings.h"
 #include "JJ2Tileset.h"
 
+#include "../../nCine/Base/Algorithms.h"
+#if defined(WITH_THREADS)
+#	include "../../nCine/Threading/Thread.h"
+#	include "../../nCine/Threading/ThreadSync.h"
+#endif
+
+#include <atomic>
+
 #include <Containers/GrowableArray.h>
 #include <Containers/StringConcatenable.h>
 #include <Containers/StringUtils.h>
@@ -20,15 +28,29 @@ namespace Jazz2::Compatibility
 {
 	namespace
 	{
-		/**
-			@brief Episodes the original game and its expansions came with
-
-			`hh24` has no levels in the table of known ones below, which is exactly why the filter follows each
-			episode's chain instead of trusting that table to be complete.
-		*/
+		/** @brief Episodes the original game and its expansions came with */
 		static const StringView OriginalEpisodes[] = {
 			"prince"_s, "rescue"_s, "flash"_s, "monk"_s, "share"_s,
 			"xmas98"_s, "xmas99"_s, "secretf"_s, "hh17"_s, "hh18"_s, "hh24"_s
+		};
+
+		/**
+			@brief Levels of the original episodes that no other level of their episode leads to
+
+			Every other level of an episode is found by following the exits from its first level, see
+			@ref CollectEpisodeLevels(). The tutorial is started by the menu, and `psych3` isn't reachable in
+			the original game either.
+		*/
+		static const Pair<StringView, StringView> UnreachableEpisodeLevels[] = {
+			{ "trainer"_s, "prince"_s },
+			{ "psych3"_s, "rescue"_s }
+		};
+
+		/** @brief Level names that are instructions to the game rather than levels */
+		static const Pair<StringView, StringView> SpecialLevelTokens[] = {
+			{ "end"_s, ":end"_s },
+			{ "endepis"_s, ":end"_s },
+			{ "ending"_s, ":credits"_s }
 		};
 
 		/**
@@ -66,6 +88,77 @@ namespace Jazz2::Compatibility
 			"sharectf"_s, "sharect2"_s, "sharetrs"_s
 		};
 
+#if defined(WITH_THREADS)
+		using ConversionMutex = nCine::Mutex;
+#else
+		struct ConversionMutex
+		{
+			void Lock() {}
+			void Unlock() {}
+		};
+#endif
+
+		/** @brief Holds a @ref ConversionMutex until the end of the scope */
+		class ConversionLock
+		{
+		public:
+			explicit ConversionLock(ConversionMutex& mutex)
+				: _mutex(mutex)
+			{
+				_mutex.Lock();
+			}
+			~ConversionLock()
+			{
+				_mutex.Unlock();
+			}
+
+			ConversionLock(const ConversionLock&) = delete;
+			ConversionLock& operator=(const ConversionLock&) = delete;
+
+		private:
+			ConversionMutex& _mutex;
+		};
+
+		/**
+			@brief Calls @p work with every index from 0 up to @p count, on as many threads as there are processors
+
+			The levels and the tile sets don't depend on each other, so they're converted at once. What they share has to be
+			locked by the caller.
+		*/
+		template<class Fn>
+		void ForEachParallel(std::int32_t count, Fn&& work)
+		{
+#if defined(WITH_THREADS)
+#	if defined(DEATH_TARGET_CONSTRAINED_MEMORY)
+			// Each of them has a whole level or tile set in memory
+			constexpr std::int32_t MaxThreads = 2;
+#	else
+			constexpr std::int32_t MaxThreads = 8;
+#	endif
+			std::int32_t threadCount = std::min(std::min(std::int32_t(nCine::Thread::GetProcessorCount()), MaxThreads), count);
+			if (threadCount > 1) {
+				std::atomic<std::int32_t> next{0};
+				auto run = [&next, &work, count]() {
+					for (std::int32_t i = next.fetch_add(1); i < count; i = next.fetch_add(1)) {
+						work(i);
+					}
+				};
+				SmallVector<nCine::Thread, MaxThreads> threads;
+				for (std::int32_t i = 1; i < threadCount; i++) {
+					threads.emplace_back(run);
+				}
+				run();
+				for (nCine::Thread& thread : threads) {
+					thread.Join();
+				}
+				return;
+			}
+#endif
+			for (std::int32_t i = 0; i < count; i++) {
+				work(i);
+			}
+		}
+
 		bool IsOriginalEpisode(StringView name)
 		{
 			for (StringView episode : OriginalEpisodes) {
@@ -86,6 +179,16 @@ namespace Jazz2::Compatibility
 				return IsOriginalEpisode(name);
 			}
 			return true;
+		}
+
+		bool IsSpecialLevelToken(StringView token)
+		{
+			for (const auto& special : SpecialLevelTokens) {
+				if (token == special.first()) {
+					return true;
+				}
+			}
+			return false;
 		}
 
 		/** @brief Lowercased level token, with the extension and any directory dropped */
@@ -110,10 +213,10 @@ namespace Jazz2::Compatibility
 			pending.push_back(NormalizeLevelToken(firstLevel));
 
 			while (!pending.empty()) {
-				String current = std::move(pending.back());
+				String current = Death::move(pending.back());
 				pending.pop_back();
 				// A token starting with ':' is an instruction to the game ("end of episode", "credits"), not a level
-				if (current.empty() || current[0] == ':' || reachable.contains(current)) {
+				if (current.empty() || current[0] == ':' || IsSpecialLevelToken(current) || reachable.contains(current)) {
 					continue;
 				}
 
@@ -123,17 +226,239 @@ namespace Jazz2::Compatibility
 				}
 				reachable.emplace(current, true);
 
-				JJ2Level level;
-				if (!level.Open(file->second, false)) {
+				String nextLevel, secretLevel, bonusLevel;
+				if (!JJ2Level::ReadExits(file->second, nextLevel, secretLevel, bonusLevel)) {
 					continue;
 				}
-				for (StringView exit : { StringView(level.NextLevel), StringView(level.SecretLevel), StringView(level.BonusLevel) }) {
+				for (StringView exit : { StringView(nextLevel), StringView(secretLevel), StringView(bonusLevel) }) {
 					if (!exit.empty()) {
 						pending.push_back(NormalizeLevelToken(exit));
 					}
 				}
 			}
 		}
+
+		/** @brief Episodes that lead to a level, see @ref AssignEpisodeLevels() */
+		struct EpisodeClaim
+		{
+			String Original;
+			String Custom;
+			bool OriginalShared = false;
+			bool CustomShared = false;
+
+			void Add(StringView episodeName)
+			{
+				const bool isOriginal = IsOriginalEpisode(episodeName);
+				String& claimed = (isOriginal ? Original : Custom);
+				if (claimed.empty()) {
+					claimed = episodeName;
+				} else if (claimed != episodeName) {
+					(isOriginal ? OriginalShared : CustomShared) = true;
+				}
+			}
+		};
+
+		/**
+			@brief Decides the episode of every level that an episode leads to
+
+			A level that more episodes lead to belongs to the original one of them, so a custom episode that continues
+			into an original level doesn't take it. If that is still more than one, it belongs to none of them and the
+			episode is left empty. The level is still a level of an episode, but its directory would otherwise depend on
+			the order the files are found in.
+		*/
+		HashMap<String, String> AssignEpisodeLevels(const HashMap<String, EpisodeClaim>& claims)
+		{
+			HashMap<String, String> levelEpisodes;
+			for (const auto& pair : claims) {
+				const EpisodeClaim& claim = pair.second;
+				const bool isShared = (!claim.Original.empty() ? claim.OriginalShared : claim.CustomShared);
+				StringView episodeName = (!claim.Original.empty() ? StringView(claim.Original) : StringView(claim.Custom));
+				if (isShared) {
+					LOGW("Level \"{}\" is reached from more than one episode, it's converted as a level of no episode", pair.first);
+					episodeName = {};
+				}
+				levelEpisodes.emplace(pair.first, String(episodeName));
+			}
+			return levelEpisodes;
+		}
+
+		/**
+			@brief Tiles of the original tile sets the previews of the levels are drawn with, see JJ2Level::Convert()
+
+			A preview takes only a few hundred tiles of a tile set. Where memory is scarce, only those are read from the
+			file, a whole tile set wouldn't fit beside the level being converted. Elsewhere, many levels share a tile set,
+			and reading one takes longer than converting a level, so the whole tile sets used last are kept for the levels
+			after, as many as fit into a budget - a tile set of a few thousand tiles takes megabytes - and the tiles are
+			copied from them. A tile set that isn't there is remembered as such.
+		*/
+		class PreviewTilesetCache
+		{
+		public:
+			explicit PreviewTilesetCache(StringView sourcePath)
+				: _sourcePath(sourcePath)
+			{
+			}
+
+			/**
+			 * @brief Returns the tiles of a tile set of a name in the order of @p tiles, or `nullptr` if the source directory
+			 *        doesn't have it, and sets @p tileCount to the number of tiles of the whole tile set
+			 */
+			std::shared_ptr<const Formats::TileSetData> Get(StringView name, ArrayView<const std::int32_t> tiles, std::int32_t& tileCount)
+			{
+#if defined(DEATH_TARGET_CONSTRAINED_MEMORY)
+				auto adjustedPath = fs::FindPathCaseInsensitive(fs::CombinePath(_sourcePath, String(name + ".j2t"_s)));
+				if (!fs::IsReadableFile(adjustedPath)) {
+					return nullptr;
+				}
+				auto data = std::make_shared<Formats::TileSetData>();
+				if (!JJ2Tileset::ConvertTiles(adjustedPath, tiles, *data, tileCount)) {
+					return nullptr;
+				}
+				return data;
+#else
+				std::shared_ptr<const Formats::TileSetData> whole = GetWhole(name);
+				if (whole == nullptr) {
+					return nullptr;
+				}
+				tileCount = whole->TileCount;
+
+				auto data = std::make_shared<Formats::TileSetData>();
+				std::memcpy(data->Palette, whole->Palette, sizeof(data->Palette));
+				data->Resize(std::int32_t(tiles.size()));
+				for (std::size_t i = 0; i < tiles.size(); i++) {
+					std::int32_t tile = tiles[i];
+					if (tile >= 0 && tile < whole->TileCount) {
+						data->TrueColor[i] = whole->TrueColor[tile];
+						std::memcpy(&data->Images[i * Formats::TileSetData::ImageBytesPerTile],
+							&whole->Images[std::size_t(tile) * Formats::TileSetData::ImageBytesPerTile], Formats::TileSetData::ImageBytesPerTile);
+					}
+				}
+				return data;
+#endif
+			}
+
+		private:
+#if !defined(DEATH_TARGET_CONSTRAINED_MEMORY)
+			struct Entry
+			{
+				String Name;
+				std::shared_ptr<Formats::TileSetData> Data;
+				std::uint32_t LastUse;
+			};
+
+			static constexpr std::size_t Budget = 64 * 1024 * 1024;
+
+			SmallVector<Entry, 0> _entries;
+			std::size_t _size = 0;
+			std::uint32_t _lastUse = 0;
+
+			// The whole tile set of a name, or `nullptr` if the source directory doesn't have it
+			std::shared_ptr<const Formats::TileSetData> GetWhole(StringView name)
+			{
+				_lastUse++;
+				for (Entry& entry : _entries) {
+					if (entry.Name == name) {
+						entry.LastUse = _lastUse;
+						return entry.Data;
+					}
+				}
+
+				std::shared_ptr<Formats::TileSetData> data;
+				auto adjustedPath = fs::FindPathCaseInsensitive(fs::CombinePath(_sourcePath, String(name + ".j2t"_s)));
+				if (fs::IsReadableFile(adjustedPath)) {
+					JJ2Tileset tileset;
+					if (tileset.Open(adjustedPath, false)) {
+						data = std::make_shared<Formats::TileSetData>();
+						tileset.Convert(*data);
+					}
+				}
+
+				// One that doesn't fit into the budget on its own isn't kept at all, it would only push out all the others
+				// and then stay behind once the level that asked for it is done
+				std::size_t size = GetDataSize(data.get());
+				if (size > Budget) {
+					return data;
+				}
+
+				// The ones used longest ago make room, a level still holds those it's drawn with
+				while (!_entries.empty() && _size + size > Budget) {
+					std::size_t oldest = 0;
+					for (std::size_t i = 1; i < _entries.size(); i++) {
+						if (_entries[i].LastUse < _entries[oldest].LastUse) {
+							oldest = i;
+						}
+					}
+					_size -= GetDataSize(_entries[oldest].Data.get());
+					_entries.erase(_entries.begin() + oldest);
+				}
+				_entries.push_back({ String(name), data, _lastUse });
+				_size += size;
+				return data;
+			}
+
+			// The memory a tile set takes, its masks and the flags of its true color tiles included
+			static std::size_t GetDataSize(const Formats::TileSetData* data)
+			{
+				return (data != nullptr ? data->Images.size() + data->TrueColor.size() + data->Masks.size() : 0);
+			}
+#endif
+
+			String _sourcePath;
+		};
+
+		/**
+			@brief Textures of the textured layers of JJ2+, see JJ2Level::Convert()
+
+			`Plus.j2d` of a JJ2+ installation has them as `TextureBG.<n>`, 256×256 palette indices each, `n` being the
+			value of `TEXTURE::Texture` that names it. The file is read only once a level asks for one of them, few levels
+			do, and only the textures are kept of it.
+		*/
+		class PlusTextureCache
+		{
+		public:
+			explicit PlusTextureCache(StringView sourcePath)
+				: _sourcePath(sourcePath), _loaded(false)
+			{
+			}
+
+			/** @brief Fills the pixels of a texture of a number, returns `false` if the source directory doesn't have it */
+			bool Get(std::int32_t index, std::uint8_t* pixels)
+			{
+				if (!_loaded) {
+					_loaded = true;
+					auto path = fs::FindPathCaseInsensitive(fs::CombinePath(_sourcePath, "Plus.j2d"_s));
+					JJ2Data data;
+					if (fs::IsReadableFile(path) && data.Open(path, false)) {
+						for (JJ2Data::Item& item : data.Items) {
+							if (item.Filename.hasPrefix("TextureBG."_s) && item.Size == TextureBytes) {
+								StringView number = item.Filename.exceptPrefix("TextureBG."_s);
+								_textures.push_back({ stou32(number.data(), number.size()), Death::move(item.Blob) });
+							}
+						}
+					}
+				}
+				for (const Entry& entry : _textures) {
+					if (entry.Index == std::uint32_t(index)) {
+						std::memcpy(pixels, entry.Pixels.get(), TextureBytes);
+						return true;
+					}
+				}
+				return false;
+			}
+
+		private:
+			static constexpr std::int32_t TextureBytes = Formats::TexturedLayerChunk::TextureSize * Formats::TexturedLayerChunk::TextureSize;
+
+			struct Entry
+			{
+				std::uint32_t Index;
+				std::unique_ptr<std::uint8_t[]> Pixels;
+			};
+
+			String _sourcePath;
+			SmallVector<Entry, 0> _textures;
+			bool _loaded;
+		};
 	}
 
 	AssetConverter::Result AssetConverter::ConvertSourceAssets(StringView animsPath, StringView sourcePath, StringView targetPath,
@@ -180,108 +505,65 @@ namespace Jazz2::Compatibility
 		Compatibility::EventConverter eventConverter;
 
 		bool hasChristmasChronicles = fs::IsReadableFile(fs::FindPathCaseInsensitive(fs::CombinePath(sourcePath, "xmas99.j2e"_s)));
-		const HashMap<String, Pair<String, String>> knownLevels = {
-			{ "trainer"_s, { "prince"_s, {} } },
-			{ "castle1"_s, { "prince"_s, "01"_s } },
-			{ "castle1n"_s, { "prince"_s, "02"_s } },
-			{ "carrot1"_s, { "prince"_s, "03"_s } },
-			{ "carrot1n"_s, { "prince"_s, "04"_s } },
-			{ "labrat1"_s, { "prince"_s, "05"_s } },
-			{ "labrat2"_s, { "prince"_s, "06"_s } },
-			{ "labrat3"_s, { "prince"_s, "bonus"_s } },
 
-			{ "colon1"_s, { "rescue"_s, "01"_s } },
-			{ "colon2"_s, { "rescue"_s, "02"_s } },
-			{ "psych1"_s, { "rescue"_s, "03"_s } },
-			{ "psych2"_s, { "rescue"_s, "04"_s } },
-			{ "beach"_s, { "rescue"_s, "05"_s } },
-			{ "beach2"_s, { "rescue"_s, "06"_s } },
-			{ "psych3"_s, { "rescue"_s, "bonus"_s } },
+		// A level goes into the directory of the episode that leads to it, under its own name, and a level of no episode
+		// into "unknown". Which levels an episode leads to can only be answered once every level's file is known.
+		HashMap<String, String> levelFiles;
+		for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
+			if (fs::GetExtension(item) == "j2l"_s) {
+				levelFiles.emplace(NormalizeLevelToken(item), String(item));
+			}
+		}
 
-			{ "diam1"_s, { "flash"_s, "01"_s } },
-			{ "diam3"_s, { "flash"_s, "02"_s } },
-			{ "tube1"_s, { "flash"_s, "03"_s } },
-			{ "tube2"_s, { "flash"_s, "04"_s } },
-			{ "medivo1"_s, { "flash"_s, "05"_s } },
-			{ "medivo2"_s, { "flash"_s, "06"_s } },
-			{ "garglair"_s, { "flash"_s, "bonus"_s } },
-			{ "tube3"_s, { "flash"_s, "bonus"_s } },
+		const bool filtering = (options.OriginalsOnly || options.SharewareOnly || options.SkipNonEpisodeLevels);
+		HashMap<String, EpisodeClaim> claims;
+		HashMap<String, bool> allowedLevels;
+		for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
+			auto extension = fs::GetExtension(item);
+			if (extension != "j2e"_s && extension != "j2pe"_s) {
+				continue;
+			}
+			JJ2Episode episode;
+			if (!episode.Open(item) || episode.Name == "home"_s) {
+				// "home" is the custom-levels entry and reaches nothing
+				continue;
+			}
 
-			{ "jung1"_s, { "monk"_s, "01"_s } },
-			{ "jung2"_s, { "monk"_s, "02"_s } },
-			{ "hell"_s, { "monk"_s, "03"_s } },
-			{ "hell2"_s, { "monk"_s, "04"_s } },
-			{ "damn"_s, { "monk"_s, "05"_s } },
-			{ "damn2"_s, { "monk"_s, "06"_s } },
+			HashMap<String, bool> reachable;
+			CollectEpisodeLevels(levelFiles, episode.FirstLevel, reachable);
+			// "xmas98" is converted as "xmas99", see below
+			StringView episodeName = (episode.Name == "xmas98"_s ? "xmas99"_s : StringView(episode.Name));
+			const bool isAllowed = (filtering && IsAllowedEpisode(episode.Name, options));
+			for (auto& level : reachable) {
+				claims[level.first].Add(episodeName);
+				if (isAllowed) {
+					allowedLevels.emplace(level.first, true);
+				}
+			}
+		}
 
-			{ "share1"_s, { "share"_s, "01"_s } },
-			{ "share2"_s, { "share"_s, "02"_s } },
-			{ "share3"_s, { "share"_s, "03"_s } },
+		HashMap<String, String> levelEpisodes = AssignEpisodeLevels(claims);
+		for (const auto& unreachable : UnreachableEpisodeLevels) {
+			levelEpisodes.emplace(String(unreachable.first()), String(unreachable.second()));
+			if (filtering && IsAllowedEpisode(unreachable.second(), options)) {
+				allowedLevels.emplace(String(unreachable.first()), true);
+			}
+		}
 
-			{ "xmas1"_s, { "xmas99"_s, "01"_s } },
-			{ "xmas2"_s, { "xmas99"_s, "02"_s } },
-			{ "xmas3"_s, { "xmas99"_s, "03"_s } },
-
-			{ "easter1"_s, { "secretf"_s, "01"_s } },
-			{ "easter2"_s, { "secretf"_s, "02"_s } },
-			{ "easter3"_s, { "secretf"_s, "03"_s } },
-			{ "haunted1"_s, { "secretf"_s, "04"_s } },
-			{ "haunted2"_s, { "secretf"_s, "05"_s } },
-			{ "haunted3"_s, { "secretf"_s, "06"_s } },
-			{ "town1"_s, { "secretf"_s, "07"_s } },
-			{ "town2"_s, { "secretf"_s, "08"_s } },
-			{ "town3"_s, { "secretf"_s, "09"_s } },
-
-			// Holiday Hare '17
-			{ "hh17_level00"_s, { "hh17"_s, {} } },
-			{ "hh17_level01"_s, { "hh17"_s, {} } },
-			{ "hh17_level01_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level02"_s, { "hh17"_s, {} } },
-			{ "hh17_level02_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level03"_s, { "hh17"_s, {} } },
-			{ "hh17_level03_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level04"_s, { "hh17"_s, {} } },
-			{ "hh17_level04_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level05"_s, { "hh17"_s, {} } },
-			{ "hh17_level05_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level06"_s, { "hh17"_s, {} } },
-			{ "hh17_level06_save"_s, { "hh17"_s, {} } },
-			{ "hh17_level07"_s, { "hh17"_s, {} } },
-			{ "hh17_level07_save"_s, { "hh17"_s, {} } },
-			{ "hh17_ending"_s, { "hh17"_s, {} } },
-			{ "hh17_guardian"_s, { "hh17"_s, {} } },
-
-			// Holiday Hare '18
-			{ "hh18_level01"_s, { "hh18"_s, {} } },
-			{ "hh18_level02"_s, { "hh18"_s, {} } },
-			{ "hh18_level03"_s, { "hh18"_s, {} } },
-			{ "hh18_level04"_s, { "hh18"_s, {} } },
-			{ "hh18_level05"_s, { "hh18"_s, {} } },
-			{ "hh18_level06"_s, { "hh18"_s, {} } },
-			{ "hh18_level07"_s, { "hh18"_s, {} } },
-			{ "hh18_save01"_s, { "hh18"_s, {} } },
-			{ "hh18_save02"_s, { "hh18"_s, {} } },
-			{ "hh18_save03"_s, { "hh18"_s, {} } },
-			{ "hh18_save04"_s, { "hh18"_s, {} } },
-			{ "hh18_save05"_s, { "hh18"_s, {} } },
-			{ "hh18_save06"_s, { "hh18"_s, {} } },
-			{ "hh18_save07"_s, { "hh18"_s, {} } },
-			{ "hh18_ending"_s, { "hh18"_s, {} } },
-			{ "hh18_guardian"_s, { "hh18"_s, {} } },
-
-			// Special names
-			{ "end"_s, { {}, ":end"_s } },
-			{ "endepis"_s, { {}, ":end"_s } },
-			{ "ending"_s, { {}, ":credits"_s } }
+		auto GetLevelEpisode = [&levelEpisodes](StringView levelName) -> StringView {
+			auto it = levelEpisodes.find(levelName);
+			return (it != levelEpisodes.end() && !it->second.empty() ? StringView(it->second) : "unknown"_s);
 		};
 
-		auto LevelTokenConversion = [&knownLevels](StringView levelToken) -> Compatibility::JJ2Level::LevelToken {
-			auto it = knownLevels.find(levelToken);
-			if (it != knownLevels.end()) {
-				if (it->second.second().empty()) {
-					return { it->second.first(), levelToken };
+		auto LevelTokenConversion = [&levelEpisodes](StringView levelToken) -> Compatibility::JJ2Level::LevelToken {
+			for (const auto& special : SpecialLevelTokens) {
+				if (levelToken == special.first()) {
+					return { {}, special.second() };
 				}
-				return { it->second.first(), (it->second.second()[0] == ':' ? it->second.second() : (it->second.second() + "_"_s + levelToken)) };
+			}
+			auto it = levelEpisodes.find(levelToken);
+			if (it != levelEpisodes.end()) {
+				return { it->second, levelToken };
 			}
 			return { {}, levelToken };
 		};
@@ -328,47 +610,15 @@ namespace Jazz2::Compatibility
 		}
 
 		HashMap<String, bool> usedTilesets, usedMusic;
+		PreviewTilesetCache previewTilesets(sourcePath);
+		PlusTextureCache plusTextures(sourcePath);
+		auto textureLookup = [&plusTextures](std::int32_t index, std::uint8_t* pixels) {
+			return plusTextures.Get(index, pixels);
+		};
 
-		// What the filter allows through is decided up front, because it depends on the directory as a whole:
-		// which levels each episode can reach can only be answered once every level's file is known
-		const bool filtering = (options.OriginalsOnly || options.SharewareOnly || options.SkipNonEpisodeLevels);
-		HashMap<String, bool> episodeLevels, allowedLevels;
+		// Every episode contributes to "belongs to an episode" (see above), only the allowed ones to "the original
+		// game shipped this". Nothing in the data says a multiplayer level is original, so the lists are the only record.
 		if (filtering) {
-			HashMap<String, String> levelFiles;
-			for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
-				if (fs::GetExtension(item) == "j2l"_s) {
-					levelFiles.emplace(NormalizeLevelToken(item), String(item));
-				}
-			}
-
-			for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
-				auto extension = fs::GetExtension(item);
-				if (extension != "j2e"_s && extension != "j2pe"_s) {
-					continue;
-				}
-				JJ2Episode episode;
-				if (!episode.Open(item) || episode.Name == "home"_s) {
-					// "home" is the custom-levels entry and reaches nothing
-					continue;
-				}
-				// Every episode contributes to "belongs to an episode"; only the original ones contribute to
-				// "the original game shipped this"
-				CollectEpisodeLevels(levelFiles, episode.FirstLevel, episodeLevels);
-				if (IsAllowedEpisode(episode.Name, options)) {
-					CollectEpisodeLevels(levelFiles, episode.FirstLevel, allowedLevels);
-				}
-			}
-
-			// The table of known levels covers the original episodes whether or not their episode file is present
-			for (auto& knownLevel : knownLevels) {
-				if (!knownLevel.second.first().empty()) {
-					episodeLevels.emplace(knownLevel.first, true);
-					if (IsAllowedEpisode(knownLevel.second.first(), options)) {
-						allowedLevels.emplace(knownLevel.first, true);
-					}
-				}
-			}
-			// Nothing in the data says a multiplayer level is original, so the lists above are the only record
 			if (options.SharewareOnly) {
 				for (StringView stockLevel : SharewareStandaloneLevels) {
 					allowedLevels.emplace(String(stockLevel), true);
@@ -385,25 +635,10 @@ namespace Jazz2::Compatibility
 		ConversionProgress levelProgress = progress.Narrow(0.0f, 0.6f);
 		ConversionProgress tilesetProgress = progress.Narrow(0.6f, 1.0f);
 
-		// How many files there are to go through can only be told by enumerating the directory, which is not
-		// worth doing twice unless the count is going to be shown to someone
-		std::int32_t filesTotal = 0, filesDone = 0;
-		if (levelProgress.IsActive()) {
-			for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
-				auto extension = fs::GetExtension(item);
-				if (extension == "j2l"_s || extension == "j2e"_s || extension == "j2pe"_s) {
-					filesTotal++;
-				}
-			}
-		}
-
+		// The episodes are converted as they're found, the levels are collected and converted afterwards, several at once
+		SmallVector<String, 0> pendingLevels;
 		for (auto item : fs::Directory(fs::FindPathCaseInsensitive(sourcePath), fs::EnumerationOptions::SkipDirectories)) {
 			auto extension = fs::GetExtension(item);
-			if (extension == "j2l"_s || extension == "j2e"_s || extension == "j2pe"_s) {
-				// Counted before the file is converted rather than after, because the loop skips the rest of the
-				// body in a dozen places
-				levelProgress.ReportStep(++filesDone, filesTotal);
-			}
 			if (extension == "j2e"_s || extension == "j2pe"_s) {
 				// Episode
 				if (!recreateAll) {
@@ -432,7 +667,7 @@ namespace Jazz2::Compatibility
 					}
 
 					String fullPath = fs::CombinePath(episodesPath, String((episode.Name == "xmas98"_s ? "xmas99"_s : StringView(episode.Name)) + ".j2e"_s));
-					episode.Convert(fullPath, std::move(LevelTokenConversion), std::move(EpisodeNameConversion), std::move(EpisodePrevNext));
+					episode.Convert(fullPath, Death::move(LevelTokenConversion), Death::move(EpisodeNameConversion), Death::move(EpisodePrevNext));
 				}
 			} else if (extension == "j2l"_s) {
 				// Level
@@ -443,10 +678,10 @@ namespace Jazz2::Compatibility
 						// filtered out never has to be opened at all
 						String token = NormalizeLevelToken(item);
 						const bool allowed = ((!options.OriginalsOnly && !options.SharewareOnly) || allowedLevels.contains(token))
-							&& (!options.SkipNonEpisodeLevels || episodeLevels.contains(token));
+							&& (!options.SkipNonEpisodeLevels || levelEpisodes.contains(token));
 						if (!allowed) {
 							if (options.SkippedLevels != nullptr) {
-								options.SkippedLevels->push_back(std::move(token));
+								options.SkippedLevels->push_back(Death::move(token));
 							}
 							continue;
 						}
@@ -454,68 +689,13 @@ namespace Jazz2::Compatibility
 
 					if (!recreateAll) {
 						StringUtils::lowercaseInPlace(levelName);
-
-						String fullPath;
-						auto it = knownLevels.find(levelName);
-						if (it != knownLevels.end()) {
-							if (it->second.second().empty()) {
-								fullPath = fs::CombinePath({ episodesPath, it->second.first(), String(levelName + ".j2l"_s) });
-							} else {
-								fullPath = fs::CombinePath({ episodesPath, it->second.first(), String(it->second.second() + '_' + levelName + ".j2l"_s) });
-							}
-						} else {
-							fullPath = fs::CombinePath({ episodesPath, "unknown"_s, String(levelName + ".j2l"_s) });
-						}
-
+						String fullPath = fs::CombinePath({ episodesPath, GetLevelEpisode(levelName), String(levelName + ".j2l"_s) });
 						if (fs::FileExists(fullPath)) {
 							continue;
 						}
 					}
 
-					Compatibility::JJ2Level level;
-					if (level.Open(item, false)) {
-						String fullPath;
-						auto it = knownLevels.find(level.LevelName);
-						if (it != knownLevels.end()) {
-							if (it->second.second().empty()) {
-								fullPath = fs::CombinePath({ episodesPath, it->second.first(), String(level.LevelName + ".j2l"_s) });
-							} else {
-								fullPath = fs::CombinePath({ episodesPath, it->second.first(), String(it->second.second() + '_' + level.LevelName + ".j2l"_s) });
-							}
-						} else {
-							fullPath = fs::CombinePath({ episodesPath, "unknown"_s, String(level.LevelName + ".j2l"_s) });
-						}
-
-						fs::CreateDirectories(fs::GetDirectoryName(fullPath));
-						level.Convert(fullPath, eventConverter, LevelTokenConversion);
-
-						usedTilesets.emplace(level.Tileset, true);
-						for (auto& extraTileset : level.ExtraTilesets) {
-							usedTilesets.emplace(extraTileset.Name, true);
-						}
-						if (!level.Music.empty()) {
-							// Recorded exactly as the converted level will ask for it: the original data leaves the
-							// extension off its own music, and JJ2Level::Convert fills in ".j2b" (see there)
-							String music = StringUtils::lowercase(level.Music);
-							if (music.find('.') == nullptr) {
-								music += ".j2b"_s;
-							}
-							usedMusic.emplace(std::move(music), true);
-						}
-						// The track a boss fight switches to is named only by the event that starts it
-						for (const String& eventMusic : level.GetEventMusic()) {
-							usedMusic.emplace(eventMusic, true);
-						}
-
-						// Also copy level script file if exists
-						StringView foundDot = item.findLastOr('.', item.end());
-						String scriptPath = item.prefix(foundDot.begin()) + ".j2as"_s;
-						auto adjustedPath = fs::FindPathCaseInsensitive(scriptPath);
-						if (fs::IsReadableFile(adjustedPath)) {
-							foundDot = fullPath.findLastOr('.', fullPath.end());
-							fs::Copy(adjustedPath, String(fullPath.prefix(foundDot.begin()) + ".j2as"_s));
-						}
-					}
+					pendingLevels.push_back(String(item));
 				}
 			}
 	#if defined(DEATH_DEBUG)
@@ -530,6 +710,64 @@ namespace Jazz2::Compatibility
 			}*/
 	#endif
 		}
+
+		// What the levels share is locked, the caches and the lists of what they use
+		ConversionMutex sharedLock;
+		std::int32_t levelsDone = 0;
+		auto lockedTextureLookup = [&sharedLock, &textureLookup](std::int32_t index, std::uint8_t* pixels) {
+			ConversionLock lock(sharedLock);
+			return textureLookup(index, pixels);
+		};
+		ForEachParallel(std::int32_t(pendingLevels.size()), [&](std::int32_t index) {
+			StringView item = pendingLevels[index];
+			Compatibility::JJ2Level level;
+			if (level.Open(item, false)) {
+				StringView episodeName = GetLevelEpisode(level.LevelName);
+				String fullPath = fs::CombinePath({ episodesPath, episodeName, String(level.LevelName + ".j2l"_s) });
+
+				fs::CreateDirectories(fs::GetDirectoryName(fullPath));
+				if (episodeName == "unknown"_s) {
+					// The list of custom levels shows the levels of no episode, each with its preview
+					level.Convert(fullPath, eventConverter, LevelTokenConversion, [&sharedLock, &previewTilesets](StringView name, ArrayView<const std::int32_t> tiles, std::int32_t& tileCount) {
+						ConversionLock lock(sharedLock);
+						return previewTilesets.Get(name, tiles, tileCount);
+					}, lockedTextureLookup);
+				} else {
+					level.Convert(fullPath, eventConverter, LevelTokenConversion, {}, lockedTextureLookup);
+				}
+
+				// Also copy level script file if exists
+				StringView foundDot = item.findLastOr('.', item.end());
+				String scriptPath = item.prefix(foundDot.begin()) + ".j2as"_s;
+				auto adjustedPath = fs::FindPathCaseInsensitive(scriptPath);
+				if (fs::IsReadableFile(adjustedPath)) {
+					foundDot = fullPath.findLastOr('.', fullPath.end());
+					fs::Copy(adjustedPath, String(fullPath.prefix(foundDot.begin()) + ".j2as"_s));
+				}
+
+				ConversionLock lock(sharedLock);
+				usedTilesets.emplace(level.Tileset, true);
+				for (auto& extraTileset : level.ExtraTilesets) {
+					usedTilesets.emplace(extraTileset.Name, true);
+				}
+				if (!level.Music.empty()) {
+					// Recorded exactly as the converted level will ask for it: the original data leaves the
+					// extension off its own music, and JJ2Level::Convert fills in ".j2b" (see there)
+					String music = StringUtils::lowercase(level.Music);
+					if (music.find('.') == nullptr) {
+						music += ".j2b"_s;
+					}
+					usedMusic.emplace(Death::move(music), true);
+				}
+				// The track a boss fight switches to is named only by the event that starts it
+				for (const String& eventMusic : level.GetEventMusic()) {
+					usedMusic.emplace(eventMusic, true);
+				}
+			}
+
+			ConversionLock lock(sharedLock);
+			levelProgress.ReportStep(++levelsDone, std::int32_t(pendingLevels.size()));
+		});
 
 		if (options.CopyUsedMusic) {
 			// Not every track the game plays is named by a level. The main menu picks one of three, and each
@@ -585,18 +823,24 @@ namespace Jazz2::Compatibility
 				fs::CreateDirectories(tilesetsPath);
 			}
 
-			std::int32_t tilesetsDone = 0;
+			SmallVector<String, 0> tilesetNames;
 			for (auto& pair : usedTilesets) {
-				String tilesetPath = fs::CombinePath(sourcePath, String(pair.first + ".j2t"_s));
+				tilesetNames.push_back(pair.first);
+			}
+			std::int32_t tilesetsDone = 0;
+			ForEachParallel(std::int32_t(tilesetNames.size()), [&](std::int32_t index) {
+				const String& name = tilesetNames[index];
+				String tilesetPath = fs::CombinePath(sourcePath, String(name + ".j2t"_s));
 				auto adjustedPath = fs::FindPathCaseInsensitive(tilesetPath);
 				if (fs::IsReadableFile(adjustedPath)) {
 					Compatibility::JJ2Tileset tileset;
 					if (tileset.Open(adjustedPath, false)) {
-						tileset.Convert(fs::CombinePath({ tilesetsPath, String(pair.first + ".j2t"_s) }));
+						tileset.Convert(fs::CombinePath({ tilesetsPath, String(name + ".j2t"_s) }));
 					}
 				}
-				tilesetProgress.ReportStep(++tilesetsDone, (std::int32_t)usedTilesets.size());
-			}
+				ConversionLock lock(sharedLock);
+				tilesetProgress.ReportStep(++tilesetsDone, std::int32_t(tilesetNames.size()));
+			});
 		}
 
 		progress.Report(1.0f);

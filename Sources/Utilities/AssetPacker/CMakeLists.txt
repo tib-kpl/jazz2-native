@@ -36,6 +36,8 @@ set(SOURCES
 	Main.cpp
 	CartridgeImage.cpp
 	CartridgeImage.h
+	ContentFilter.cpp
+	ContentFilter.h
 	DiscImage.cpp
 	DiscImage.h
 	FontPacker.cpp
@@ -44,14 +46,22 @@ set(SOURCES
 	Iso9660.h
 	FormatVerifier.cpp
 	FormatVerifier.h
+	LevelText.cpp
+	LevelText.h
 	ModuleConverter.cpp
 	ModuleConverter.h
 	N64Content.cpp
 	N64Content.h
-	PngCodec.cpp
-	PngCodec.h
 	SpriteRepacker.cpp
 	SpriteRepacker.h
+	TranslationFilter.cpp
+	TranslationFilter.h
+	# Reads and writes the images of the fonts, the PNG codec of the engine, which depends on nothing but the base layer
+	${NCINE_SOURCE_DIR}/nCine/Graphics/PngCodec.cpp
+	${NCINE_SOURCE_DIR}/nCine/Graphics/PngCodec.h
+	# The translated level texts, a chunk only the game reads, but the formats verifier and fuzzer check it too
+	${NCINE_SOURCE_DIR}/Jazz2/Formats/LevelTextsChunk.cpp
+	${NCINE_SOURCE_DIR}/Jazz2/Formats/LevelTextsChunk.h
 	# The base layer and the original-data converters, both shared with the game; the engine itself is
 	# deliberately not linked, so the tool has no renderer and no window backend
 	${ASSET_PACKER_SHARED_SOURCES}
@@ -114,8 +124,10 @@ target_sources(AssetPacker PRIVATE ${SOURCES})
 # output. NCINE_VERSION matches the game so the cache index it writes isn't seen as coming from another build,
 # and NCINE_APP_NAME and NCINE_GAMECUBE_GAME_ID are the title and the game ID a GameCube disc image is given
 # unless others are named.
-target_compile_definitions(AssetPacker PRIVATE "CMAKE_BUILD" "DEATH_NO_THREADS" "DEATH_TRACE" "NCINE_VERSION=\"${NCINE_VERSION}\""
+target_compile_definitions(AssetPacker PRIVATE "CMAKE_BUILD" "DEATH_TRACE" "NCINE_VERSION=\"${NCINE_VERSION}\""
 	"NCINE_APP_NAME=\"${NCINE_APP_NAME}\"" "NCINE_GAMECUBE_GAME_ID=\"${GAMECUBE_GAME_ID}\"")
+# The PNG codec writes images only where asked to, the game itself never does (see nCine/Graphics/PngCodec.h)
+target_compile_definitions(AssetPacker PRIVATE "WITH_PNG_ENCODER")
 
 if(WIN32)
 	# Not going through ncine_apply_compiler_options() also means missing the Unicode switch it sets for the game.
@@ -147,6 +159,17 @@ if(TARGET ZLIB::ZLIB)
 endif()
 if(TARGET Threads::Threads)
 	target_link_libraries(AssetPacker PRIVATE Threads::Threads)
+	# The levels and tilesets are converted several at once (see AssetConverter::ConvertLevels()), the web version
+	# stays single-threaded, see below
+	if(NOT EMSCRIPTEN)
+		target_compile_definitions(AssetPacker PRIVATE "WITH_THREADS")
+		target_sources(AssetPacker PRIVATE ${NCINE_SOURCE_DIR}/nCine/Threading/Thread.cpp)
+		if(WIN32)
+			target_sources(AssetPacker PRIVATE ${NCINE_SOURCE_DIR}/nCine/Threading/WindowsThreadSync.cpp)
+		else()
+			target_sources(AssetPacker PRIVATE ${NCINE_SOURCE_DIR}/nCine/Threading/PosixThreadSync.cpp)
+		endif()
+	endif()
 endif()
 
 # LZ4 writes the sprite sheets and tilesets of the trees for the consoles that read them that way (see

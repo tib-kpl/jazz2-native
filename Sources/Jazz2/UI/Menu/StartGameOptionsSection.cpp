@@ -213,6 +213,7 @@ namespace Jazz2::UI::Menu
 
 				_items[i].TouchY = center.Y + subItemOffset;
 			} else if (i == (std::int32_t)Item::Difficulty) {
+				// TRANSLATORS: Options for Difficulty item before starting an episode/level, shown side by side, keep them short
 				const StringView difficultyTypes[] = { _("Easy"), _("Medium"), _("Hard") };
 				float spacing = 100.0f * columnScale;
 
@@ -337,7 +338,7 @@ namespace Jazz2::UI::Menu
 
 	void StartGameOptionsSection::OnAfterTransition()
 	{
-		bool playTutorial = (!PreferencesCache::TutorialCompleted && _levelName == "prince/01_castle1"_s);
+		bool playTutorial = (!PreferencesCache::TutorialCompleted && _levelName == "prince/castle1"_s);
 		if (playTutorial && !ContentResolver::Get().LevelExists("prince/trainer"_s)) {
 			LOGW("Tutorial level \"prince/trainer.j2l\" not found, skipping tutorial");
 			playTutorial = false;
@@ -370,7 +371,7 @@ namespace Jazz2::UI::Menu
 			}
 		}
 
-		if (PreferencesCache::EnableReforgedGameplay && _levelName.hasSuffix("/01_xmas1"_s)) {
+		if (PreferencesCache::EnableReforgedGameplay && _levelName.hasSuffix("/xmas1"_s)) {
 			levelInit.LastExitType = ExitType::Warp | ExitType::Frozen;
 		}
 
@@ -379,7 +380,7 @@ namespace Jazz2::UI::Menu
 			levelInit.CheatsUsed = true;
 		}
 
-		_root->ChangeLevel(std::move(levelInit));
+		_root->ChangeLevel(Death::move(levelInit));
 	}
 
 	void StartGameOptionsSection::StartImageTransition()

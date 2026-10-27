@@ -2,13 +2,25 @@
 
 #if defined(WITH_EDITOR)
 
-#include "../EditorSession.h"
+#include "PropertyRows.h"
+#include "ShellCommon.h"
+#include "TextPrompt.h"
+#include "../Tools/EditorContext.h"
+#include "../Common/TileStamp.h"
+#include "../Document/CommandHistory.h"
+#include "../Document/DocumentSnapshot.h"
+#include "../Document/LevelDocument.h"
+#include "../Tools/EditorTool.h"
 #include "../Document/Commands.h"
+#include "../Document/TerrainSplines.h"
+#include "LevelTextLanguages.h"
+#include "../../Formats/LevelTextsChunk.h"
 #include "../UI/UiColors.h"
 #include "../UI/UiDialogs.h"
 #include "../UI/UiMenu.h"
 #include "../UI/UiSurface.h"
 #include "../../ContentResolver.h"
+#include "../../Formats/LevelPreview.h"
 #include "../../Formats/TileSetFile.h"
 #include "../../PreferencesCache.h"
 #include "../../WeatherType.h"
@@ -33,26 +45,33 @@ namespace Jazz2::Editor
 
 		UiStack* AddRow(UiElement* parent, StringView label)
 		{
-			// A form puts the labels in a column as wide as the longest of them
-			if (auto* form = runtime_cast<UiForm>(parent)) {
-				return form->AddRow(label);
-			}
-			auto* row = parent->Add<UiStack>(UiOrientation::Horizontal, UiTheme::Spacing);
-			row->Add<UiLabel>(label, UiTheme::TextDim)->Width = LabelWidth;
-			return row;
+			return AddLabeledRow(parent, label, {}, LabelWidth);
 		}
 
-		// Changes the flags or the properties as an undoable step, consecutive changes are merged
-		void ChangeProperties(EditorSession& session, Function<void(LevelFlags&, Formats::LevelProperties&)>&& change)
+		// Changes the flags or the properties as an undoable step, the changes of a value while it's dragged are merged,
+		// @p final ends the step, a change that isn't dragged is always final
+		void ChangeProperties(IEditorContext& session, Function<void(LevelFlags&, Formats::LevelProperties&)>&& change, bool final = true)
 		{
 			LevelDocument& document = session.GetDocument();
 			LevelFlags flags = document.Flags;
 			Formats::LevelProperties properties = document.Properties;
 			change(flags, properties);
-			session.Execute(std::make_unique<SetLevelPropertiesCommand>(document, flags, properties, _("Level properties")), true);
+			const Formats::LevelProperties& p = document.Properties;
+			bool changed = (flags != document.Flags || properties.DisplayName != p.DisplayName || properties.Author != p.Author ||
+				properties.NextLevel != p.NextLevel || properties.SecretLevel != p.SecretLevel || properties.BonusLevel != p.BonusLevel ||
+				properties.DefaultTileSet != p.DefaultTileSet || properties.Music != p.Music || properties.AmbientColor != p.AmbientColor ||
+				properties.Weather != p.Weather || properties.WeatherIntensity != p.WeatherIntensity || properties.WaterLevel != p.WaterLevel ||
+				properties.CaptionTileId != p.CaptionTileId);
+			if (changed) {
+				// TRANSLATORS: Name of an undo step in the history, a change in the Level Properties dialog
+				session.Execute(std::make_unique<SetLevelPropertiesCommand>(document, flags, properties, _x("editor", "Level properties")), true);
+			}
+			if (final) {
+				session.GetHistory().BreakMerge();
+			}
 		}
 
-		void SetTextProperty(EditorSession& session, String Formats::LevelProperties::* member, StringView text)
+		void SetTextProperty(IEditorContext& session, String Formats::LevelProperties::* member, StringView text)
 		{
 			if (session.GetDocument().Properties.*member != text) {
 				String value = text.trimmed();
@@ -60,12 +79,14 @@ namespace Jazz2::Editor
 			}
 		}
 
-		UiStack* AddTextProperty(UiElement* parent, EditorSession& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
+		UiStack* AddTextProperty(UiElement* parent, IEditorContext& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
 		{
-			EditorSession* s = &session;
+			IEditorContext* s = &session;
 			auto* row = AddRow(parent, label);
 			auto* box = row->Add<UiTextBox>();
+			// At least this wide, wider in a wider dialog
 			box->Width = 190.0f;
+			box->Flex = 1.0f;
 			box->MaxLength = 255;
 			box->Placeholder = placeholder;
 			box->TextFunc = [s, member]() { return s->GetDocument().Properties.*member; };
@@ -86,9 +107,9 @@ namespace Jazz2::Editor
 			return levelName;
 		}
 
-		void AddLevelProperty(UiElement* parent, EditorSession& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
+		void AddLevelProperty(UiElement* parent, IEditorContext& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
 		{
-			EditorSession* s = &session;
+			IEditorContext* s = &session;
 			auto* row = AddTextProperty(parent, session, label, member, placeholder);
 			String title = label;
 			auto* pick = row->Add<UiButton>(StringView(), EditorIcon::Folder, [s, member, title]() {
@@ -115,17 +136,20 @@ namespace Jazz2::Editor
 						}
 					}
 				}
-				UiFileDialog::Show(*surface, title, UiFileDialogMode::Open, std::move(roots), ".j2l"_s, directory, fileName, [s, member](StringView path) {
+				UiFileDialog* dialog = UiFileDialog::Show(*surface, title, UiFileDialogMode::Open, Death::move(roots), ".j2l"_s, directory, fileName, [s, member](StringView path) {
 					// The level is looked up by its name, so it doesn't matter which root it was picked from
-					SetTextProperty(*s, member, MakeLevelReference(EditorSession::MakeLevelName(path), s->GetLevelName()));
-				});
+					SetTextProperty(*s, member, MakeLevelReference(IEditorContext::MakeLevelName(path), s->GetLevelName()));
+				}, false);
+				dialog->PreviewFunc = [](StringView path, SmallVectorImpl<std::uint8_t>& rgba, Vector2i& size) {
+					return Formats::LevelPreview::Read(path, rgba, size);
+				};
 			});
-			pick->Tooltip = _("Choose a level");
+			pick->Tooltip = _x("editor", "Choose a level");
 		}
 
-		void AddMusicProperty(UiElement* parent, EditorSession& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
+		void AddMusicProperty(UiElement* parent, IEditorContext& session, StringView label, String Formats::LevelProperties::* member, StringView placeholder = {})
 		{
-			EditorSession* s = &session;
+			IEditorContext* s = &session;
 			auto* row = AddTextProperty(parent, session, label, member, placeholder);
 			String title = label;
 			auto* pick = row->Add<UiButton>(StringView(), EditorIcon::Folder, [s, member, title]() {
@@ -138,16 +162,19 @@ namespace Jazz2::Editor
 				SmallVector<UiFileRoot, 4> roots;
 				StringView userContent = resolver.GetUserContentPath();
 				if (!userContent.empty()) {
-					roots.push_back({ _("User content"), fs::CombinePath(userContent, "Music"_s), false });
+					// TRANSLATORS: Place in the file dialog choosing the music of the level, the folder of content added by the user
+					roots.push_back({ _x("editor", "User content"), fs::CombinePath(userContent, "Music"_s), false });
 				}
 				StringView content = resolver.GetContentPath();
 				if (!content.empty()) {
-					roots.push_back({ _("Content"), fs::CombinePath(content, "Music"_s), false });
+					// TRANSLATORS: Place in the file dialog choosing the music of the level, the folder of content of the game
+					roots.push_back({ _x("editor", "Content"), fs::CombinePath(content, "Music"_s), false });
 				}
 				StringView source = resolver.GetSourcePath();
 				if (!source.empty()) {
 					// Without the trailing separator, so the paths of files in it can be made relative to it
-					roots.push_back({ _("Original game"), String(source.trimmedSuffix("/\\"_s)), false });
+					// TRANSLATORS: Place in the file dialog choosing the music of the level, the folder of the original game
+					roots.push_back({ _x("editor", "Original game"), String(source.trimmedSuffix("/\\"_s)), false });
 				}
 				// Opens where the music is now, the first place that has it is the one that is played
 				StringView current = s->GetDocument().Properties.*member;
@@ -168,8 +195,8 @@ namespace Jazz2::Editor
 					rootPaths.push_back(roots[i].Path);
 					i++;
 				}
-				UiFileDialog::Show(*surface, title, UiFileDialogMode::Open, std::move(roots), ".j2b;.it;.mo3;.mod;.s3m;.xm;.ogg;.wav"_s, directory, fileName,
-					[s, member, rootPaths = std::move(rootPaths)](StringView path) {
+				UiFileDialog::Show(*surface, title, UiFileDialogMode::Open, Death::move(roots), ".j2b;.it;.mo3;.mod;.s3m;.xm;.ogg;.wav"_s, directory, fileName,
+					[s, member, rootPaths = Death::move(rootPaths)](StringView path) {
 						String value = fs::GetFileName(path);
 						for (const String& rootPath : rootPaths) {
 							if (path.hasPrefix(rootPath)) {
@@ -182,14 +209,14 @@ namespace Jazz2::Editor
 							}
 						}
 						SetTextProperty(*s, member, value);
-					});
+					}, false);
 			});
-			pick->Tooltip = _("Choose music, it starts playing right away");
+			pick->Tooltip = _x("editor", "Choose music, it starts playing right away");
 		}
 
 		// A tile of the default tile set that shows the level well on an RGB keyboard: covered by its pixels, colorful
 		// and used a lot, the score is all three multiplied
-		std::int32_t PickCaptionTile(EditorSession& session)
+		std::int32_t PickCaptionTile(IEditorContext& session)
 		{
 			const LevelDocument& document = session.GetDocument();
 			const Formats::TileSetData* tileSet = session.GetTileSetData(document.Properties.DefaultTileSet);
@@ -249,18 +276,18 @@ namespace Jazz2::Editor
 		}
 
 		// A byte of the ambient color, 0 is red, 3 is the light intensity
-		void AddColorByte(UiElement* row, EditorSession& session, std::int32_t byteIndex)
+		void AddColorByte(UiElement* row, IEditorContext& session, std::int32_t byteIndex)
 		{
-			EditorSession* s = &session;
+			IEditorContext* s = &session;
 			std::int32_t shift = byteIndex * 8;
-			auto* number = row->Add<UiNumberBox>([s, shift]() {
-				return float((s->GetDocument().Properties.AmbientColor >> shift) & 0xFF);
-			}, [s, shift](float value, bool final) {
-				std::uint32_t byte = std::uint32_t(std::clamp<std::int32_t>(std::int32_t(std::round(value)), 0, 255));
+			auto* number = AddByteBox(row, [s, shift]() {
+				return std::uint8_t((s->GetDocument().Properties.AmbientColor >> shift) & 0xFF);
+			}, [s, shift](std::uint8_t value, bool final) {
+				std::uint32_t byte = value;
 				ChangeProperties(*s, [shift, byte](LevelFlags&, Formats::LevelProperties& properties) {
 					properties.AmbientColor = (properties.AmbientColor & ~(0xFFu << shift)) | (byte << shift);
-				});
-			}, 0.0f, 255.0f, 1.0f, 0);
+				}, final);
+			});
 			number->Width = 36.0f;
 		}
 
@@ -304,8 +331,8 @@ namespace Jazz2::Editor
 		class TextsList : public UiStack
 		{
 		public:
-			explicit TextsList(EditorSession& session)
-				: UiStack(UiOrientation::Vertical, 2.0f, UiThickness(0.0f, 0.0f, 3.0f, 0.0f)), _session(session), _shownCount(-1)
+			TextsList(IEditorContext& session, std::shared_ptr<LevelTextLanguageState> language)
+				: UiStack(UiOrientation::Vertical, 2.0f, UiThickness(0.0f, 0.0f, 3.0f, 0.0f)), _session(session), _language(Death::move(language)), _shownCount(-1)
 			{
 			}
 
@@ -319,7 +346,9 @@ namespace Jazz2::Editor
 			}
 
 		private:
-			EditorSession& _session;
+			IEditorContext& _session;
+			// Language of the translations shown next to the texts, see LevelTextLanguages.h
+			std::shared_ptr<LevelTextLanguageState> _language;
 			std::int32_t _shownCount;
 
 			void Rebuild(std::int32_t count)
@@ -327,10 +356,10 @@ namespace Jazz2::Editor
 				_shownCount = count;
 				ClearChildren();
 				if (count == 0) {
-					Add<UiLabel>(_("The level has no texts"), UiTheme::TextDisabled);
+					Add<UiLabel>(_x("editor", "The level has no texts"), UiTheme::TextDisabled);
 					return;
 				}
-				EditorSession* s = &_session;
+				IEditorContext* s = &_session;
 				for (std::int32_t i = 0; i < count; i++) {
 					char number[16];
 					std::int32_t length = std::snprintf(number, sizeof(number), "%d", i);
@@ -350,13 +379,99 @@ namespace Jazz2::Editor
 						if (i >= std::int32_t(document.Texts.size()) || document.Texts[i] == unescaped) {
 							return;
 						}
-						auto command = SnapshotCommand::Begin(document, SnapshotParts::Texts, _("Level text"));
-						document.Texts[i] = std::move(unescaped);
-						DocumentChanges changes;
-						command->End(document, changes);
-						s->Execute(std::move(command));
+						// TRANSLATORS: Name of an undo step in the history, a text of the level changed in the Level Texts dialog
+						s->RecordSnapshotStep(_x("editor", "Level text"), SnapshotParts::Texts, [i, &unescaped](LevelDocument& document) {
+							document.Texts[i] = Death::move(unescaped);
+							return true;
+						});
 					};
+					// The translation to the chosen language next to it
+					AddLevelTextTranslationBox(row, _session, _language, i);
+					// Moved up or down, the events that show it follow it
+					auto* up = row->Add<UiButton>(StringView(), EditorIcon::ArrowUp, [s, i]() { SwapTexts(*s, i, i - 1); });
+					up->Style = UiButtonStyle::Flat;
+					up->Tooltip = _x("editor", "Moves the text up, the events showing it and its translations follow it");
+					up->IsEnabledFunc = [i]() { return (i > 0); };
+					auto* down = row->Add<UiButton>(StringView(), EditorIcon::ArrowDown, [s, i]() { SwapTexts(*s, i, i + 1); });
+					down->Style = UiButtonStyle::Flat;
+					down->Tooltip = _x("editor", "Moves the text down, the events showing it and its translations follow it");
+					down->IsEnabledFunc = [s, i]() { return (i + 1 < std::int32_t(s->GetDocument().Texts.size())); };
 				}
+			}
+
+			// Swaps two texts, as one step with the events that show them and their translations
+			static void SwapTexts(IEditorContext& session, std::int32_t a, std::int32_t b)
+			{
+				LevelDocument& document = session.GetDocument();
+				std::int32_t count = std::int32_t(document.Texts.size());
+				if (a < 0 || b < 0 || a >= count || b >= count || a == b) {
+					return;
+				}
+				if (!session.IsLayerEditable(document.GetSpriteLayerIndex())) {
+					session.ShowMessage(_x("editor", "The sprite layer is locked or hidden, the events showing the texts couldn't follow them"));
+					return;
+				}
+
+				CommandHistory& history = session.GetHistory();
+				// TRANSLATORS: Name of an undo step in the history, a text of the level moved up or down in the Level Texts dialog
+				history.BeginTransaction(_x("editor", "Move text"));
+				session.RecordSnapshotStep(_x("editor", "Move text"), SnapshotParts::Texts | SnapshotParts::Chunks, [a, b](LevelDocument& document) {
+					std::swap(document.Texts[a], document.Texts[b]);
+					// The translations, as numbered as the texts
+					if (const Formats::ChunkRecord* chunk = document.FindChunk(Formats::LevelTextsChunk::Tag)) {
+						SmallVector<LocalizedLevelTexts, 0> languages;
+						if (Formats::LevelTextsChunk::Read(chunk->Data, languages)) {
+							for (LocalizedLevelTexts& language : languages) {
+								if (language.Texts.size() <= std::size_t(std::max(a, b))) {
+									language.Texts.resize(std::size_t(std::max(a, b)) + 1);
+								}
+								std::swap(language.Texts[a], language.Texts[b]);
+							}
+							SmallVector<std::uint8_t, 0> data;
+							Formats::LevelTextsChunk::Write(languages, data);
+							document.SetChunk(Formats::LevelTextsChunk::Tag, data);
+						}
+					}
+					return true;
+				});
+
+				// The events showing them, on the grid and off it
+				auto remap = [a, b](Formats::EventRecord& event) {
+					const EventParamField* field = FindEventField(EventCatalog::Find(EventType(event.Type), event.Params), ParamType::TextId);
+					if (field == nullptr) {
+						return false;
+					}
+					std::int32_t index = EventCatalog::ReadField(event, *field);
+					if (index != a && index != b) {
+						return false;
+					}
+					EventCatalog::WriteField(event, *field, index == a ? b : a);
+					return true;
+				};
+				Vector2i gridSize = document.GetEventGridSize();
+				if (gridSize.X > 0) {
+					auto command = std::make_unique<SetEventsCommand>(document, _x("editor", "Move text"));
+					for (const DocumentEvent& event : document.Events) {
+						Formats::EventRecord record = event.Record;
+						if (remap(record)) {
+							command->Set(std::int32_t(event.Cell % std::uint32_t(gridSize.X)), std::int32_t(event.Cell / std::uint32_t(gridSize.X)), record);
+						}
+					}
+					command->Seal();
+					if (!command->IsEmpty()) {
+						session.Execute(Death::move(command));
+					}
+				}
+				SmallVector<Formats::OffGridEventRecord, 0> offGrid;
+				bool offGridChanged = false;
+				for (const Formats::OffGridEventRecord& event : document.OffGridEvents) {
+					Formats::OffGridEventRecord& copy = offGrid.emplace_back(event);
+					offGridChanged |= remap(copy.Event);
+				}
+				if (offGridChanged) {
+					session.Execute(std::make_unique<SetOffGridEventsCommand>(document, Death::move(offGrid), _x("editor", "Move text")));
+				}
+				history.EndTransaction();
 			}
 		};
 	}
@@ -367,8 +482,8 @@ namespace Jazz2::Editor
 		class TilePreview : public UiElement
 		{
 		public:
-			TilePreview(EditorSession& session, Function<std::int32_t()>&& tileId)
-				: _session(session), _tileId(std::move(tileId))
+			TilePreview(IEditorContext& session, Function<std::int32_t()>&& tileId)
+				: _session(session), _tileId(Death::move(tileId))
 			{
 			}
 
@@ -390,7 +505,7 @@ namespace Jazz2::Editor
 			}
 
 		private:
-			EditorSession& _session;
+			IEditorContext& _session;
 			Function<std::int32_t()> _tileId;
 		};
 
@@ -403,10 +518,10 @@ namespace Jazz2::Editor
 			/** Number of tiles in a row, or 0 for as many as fit */
 			std::int32_t FixedColumns = 0;
 
-			TileListGrid(EditorSession& session, Function<std::int32_t()>&& count, Function<std::int32_t(std::int32_t)>&& tileId,
+			TileListGrid(IEditorContext& session, Function<std::int32_t()>&& count, Function<std::int32_t(std::int32_t)>&& tileId,
 				Function<std::int32_t()>&& selected, Function<void(std::int32_t)>&& onSelect)
-				: _session(session), _count(std::move(count)), _tileId(std::move(tileId)), _selected(std::move(selected)),
-					_onSelect(std::move(onSelect)), _cellSize(1.0f), _columns(1)
+				: _session(session), _count(Death::move(count)), _tileId(Death::move(tileId)), _selected(Death::move(selected)),
+					_onSelect(Death::move(onSelect)), _cellSize(1.0f), _columns(1)
 			{
 			}
 
@@ -417,9 +532,9 @@ namespace Jazz2::Editor
 					_cellSize = std::max(1.0f, std::floor(available.X / float(FixedColumns)));
 				} else {
 					_cellSize = context.Px(CellSize);
-					_columns = std::max(1, std::int32_t(available.X / _cellSize));
+					_columns = std::max<std::int32_t>(1, std::int32_t(available.X / _cellSize));
 				}
-				std::int32_t rows = std::max(1, (_count() + _columns - 1) / _columns);
+				std::int32_t rows = std::max<std::int32_t>(1, (_count() + _columns - 1) / _columns);
 				return Vector2f(available.X, rows * _cellSize);
 			}
 
@@ -463,7 +578,7 @@ namespace Jazz2::Editor
 			}
 
 		private:
-			EditorSession& _session;
+			IEditorContext& _session;
 			Function<std::int32_t()> _count;
 			Function<std::int32_t(std::int32_t)> _tileId;
 			Function<std::int32_t()> _selected;
@@ -483,8 +598,9 @@ namespace Jazz2::Editor
 			std::int32_t Frame = 0;
 		};
 
-		// Changes the selected animated tile as an undoable step, consecutive changes of the same value are merged
-		void ChangeAnimation(EditorSession& session, std::int32_t index, const char* name, Function<void(DocumentAnimation&)>&& change)
+		// Changes the selected animated tile as an undoable step, the changes of a value while it's dragged are merged,
+		// @p final ends the step, a change that isn't dragged is always final
+		void ChangeAnimation(IEditorContext& session, std::int32_t index, StringView name, Function<void(DocumentAnimation&)>&& change, bool final = true)
 		{
 			LevelDocument& document = session.GetDocument();
 			if (index < 0 || index >= std::int32_t(document.Animations.size())) {
@@ -492,13 +608,16 @@ namespace Jazz2::Editor
 			}
 			DocumentAnimation animation = document.Animations[index];
 			change(animation);
-			session.Execute(std::make_unique<SetAnimationCommand>(document, index, std::move(animation), _(name)), true);
+			session.Execute(std::make_unique<SetAnimationCommand>(document, index, Death::move(animation), name), true);
+			if (final) {
+				session.GetHistory().BreakMerge();
+			}
 		}
 
-		void AddAnimationNumber(UiElement* parent, EditorSession& session, const std::shared_ptr<AnimationSelection>& selection, StringView label,
+		void AddAnimationNumber(UiElement* parent, IEditorContext& session, const std::shared_ptr<AnimationSelection>& selection, StringView label,
 			StringView tooltip, std::uint16_t Formats::AnimatedTileRecord::* member, float divisor, float step, std::int32_t decimals)
 		{
-			EditorSession* s = &session;
+			IEditorContext* s = &session;
 			auto* row = AddRow(parent, label);
 			row->Tooltip = tooltip;
 			auto* number = row->Add<UiNumberBox>([s, selection, member, divisor]() {
@@ -506,26 +625,27 @@ namespace Jazz2::Editor
 				return (selection->Animation < std::int32_t(animations.size()) ? float(animations[selection->Animation].Timing.*member) / divisor : 0.0f);
 			}, [s, selection, member, divisor](float value, bool final) {
 				std::uint16_t stored = std::uint16_t(std::clamp<std::int32_t>(std::int32_t(std::round(value * divisor)), 0, 65535));
-				ChangeAnimation(*s, selection->Animation, N_("Animation timing"), [member, stored](DocumentAnimation& animation) {
+				// TRANSLATORS: Name of an undo step in the history, the timing of an animated tile changed in the Animated Tiles dialog
+				ChangeAnimation(*s, selection->Animation, _x("editor", "Animation timing"), [member, stored](DocumentAnimation& animation) {
 					animation.Timing.*member = stored;
-				});
+				}, final);
 			}, 0.0f, 65535.0f / divisor, step, decimals);
 			number->Width = 60.0f;
 			number->Tooltip = tooltip;
 		}
 	}
 
-	void ShowAnimatedTilesDialog(EditorSession& session)
+	void ShowAnimatedTilesDialog(IEditorContext& session)
 	{
 		UiSurface* surface = session.GetSurface();
-		if (surface == nullptr) {
+		if (surface == nullptr || ReuseSingleDialog(session, "animatedTiles")) {
 			return;
 		}
 
-		EditorSession* s = &session;
+		IEditorContext* s = &session;
 		auto selection = std::make_shared<AnimationSelection>();
-		auto dialog = std::make_unique<UiDialog>(_("Animated Tiles"));
-		UiDialog* dialogPtr = dialog.get();
+		// TRANSLATORS: Title of the dialog that edits the animated tiles of the level
+		auto dialog = std::make_unique<UiDialog>(_x("editor", "Animated Tiles"));
 		// The animated tiles on the left, scrolled, and the selected one on the right, always in view
 		auto* columns = dialog->GetContent()->Add<UiStack>(UiOrientation::Horizontal, UiTheme::Spacing * 2.0f);
 		auto* left = columns->Add<UiStack>(UiOrientation::Vertical, UiTheme::Spacing);
@@ -539,7 +659,8 @@ namespace Jazz2::Editor
 			return (selection->Animation < std::int32_t(s->GetDocument().Animations.size()));
 		};
 
-		left->Add<UiLabel>(_("Animations"), UiTheme::TextHeader);
+		// TRANSLATORS: Header of the list of the animated tiles in the Animated Tiles dialog
+		left->Add<UiLabel>(_x("editor", "Animations"), UiTheme::TextHeader);
 		auto* listScroll = left->Add<UiScrollView>();
 		listScroll->Height = 200.0f;
 		auto* animationList = listScroll->SetContent<TileListGrid>(session, [s]() {
@@ -555,10 +676,11 @@ namespace Jazz2::Editor
 		animationList->FixedColumns = 8;
 		{
 			auto* buttons = left->Add<UiStack>(UiOrientation::Horizontal, UiTheme::Spacing);
-			buttons->Add<UiButton>(_("New"), EditorIcon::Plus, [s, selection]() {
+			// TRANSLATORS: Button in the Animated Tiles dialog, adds a new animated tile
+			buttons->Add<UiButton>(_x("editor", "New"), EditorIcon::Plus, [s, selection]() {
 				LevelDocument& document = s->GetDocument();
-				if (std::max(document.GetStaticTileCount(), 0) + std::int32_t(document.Animations.size()) >= UINT16_MAX + 1) {
-					s->ShowMessage(_("There's no room for another animated tile"));
+				if (std::max<std::int32_t>(document.GetStaticTileCount(), 0) + std::int32_t(document.Animations.size()) >= UINT16_MAX + 1) {
+					s->ShowMessage(_x("editor", "There's no room for another animated tile"));
 					return;
 				}
 				// Made of the tiles of the brush, or of one empty tile
@@ -577,13 +699,13 @@ namespace Jazz2::Editor
 				if (animation.Frames.empty()) {
 					animation.Frames.push_back(TileRef{});
 				}
-				auto command = SnapshotCommand::Begin(document, SnapshotParts::Animations, _("Add animated tile"));
-				document.Animations.push_back(std::move(animation));
-				// The animated tiles take the top of the tile ID space, it grows if they'd reach the tile sets
-				document.FitTileIdSpace();
-				DocumentChanges changes;
-				command->End(document, changes);
-				s->Execute(std::move(command));
+				// TRANSLATORS: Name of an undo step in the history
+				s->RecordSnapshotStep(_x("editor", "Add animated tile"), SnapshotParts::Animations, [&animation](LevelDocument& document) {
+					document.Animations.push_back(Death::move(animation));
+					// The animated tiles take the top of the tile ID space, it grows if they'd reach the tile sets
+					document.FitTileIdSpace();
+					return true;
+				});
 				selection->Animation = std::int32_t(document.Animations.size()) - 1;
 				selection->Frame = 0;
 			});
@@ -594,9 +716,6 @@ namespace Jazz2::Editor
 					return;
 				}
 				// Tiles that showed it show its first frame instead, tiles of the animated tiles after it move down
-				// Only tile references of the layers change, the level doesn't have to be loaded again
-				auto command = SnapshotCommand::Begin(document, SnapshotParts::Animations | SnapshotParts::Layers, _("Remove animated tile"),
-					DocumentChangeKind::AnimationStructure);
 				TileRef replacement = (!document.Animations[index].Frames.empty() ? document.Animations[index].Frames[0] : TileRef{});
 				if (replacement.IsAnimated() && replacement.Index == index) {
 					replacement = TileRef{};
@@ -616,25 +735,37 @@ namespace Jazz2::Editor
 				if (replacement.IsAnimated() && replacement.Index > index) {
 					replacement.Index--;
 				}
-				document.Animations.erase(document.Animations.begin() + index);
-				for (DocumentAnimation& animation : document.Animations) {
-					for (TileRef& frame : animation.Frames) {
-						remap(frame);
+				// Only tile references of the layers change, the level doesn't have to be loaded again
+				// TRANSLATORS: Name of an undo step in the history
+				s->RecordSnapshotStep(_x("editor", "Remove animated tile"), SnapshotParts::Animations | SnapshotParts::Layers, [index, &remap](LevelDocument& document) {
+					document.Animations.erase(document.Animations.begin() + index);
+					for (DocumentAnimation& animation : document.Animations) {
+						for (TileRef& frame : animation.Frames) {
+							remap(frame);
+						}
 					}
-				}
-				for (DocumentLayer& layer : document.Layers) {
-					for (TileRef& tile : layer.Tiles) {
+					for (DocumentLayer& layer : document.Layers) {
+						for (TileRef& tile : layer.Tiles) {
+							remap(tile);
+						}
+					}
+					// Ground lines remember the tiles they wrote, kept by the snapshot of the layers too
+					Function<bool(TileRef&)> remapLines = [&remap](TileRef& tile) {
 						remap(tile);
-					}
+						return true;
+					};
+					TerrainSpline::RemapTiles(document, remapLines);
+					return true;
+				}, DocumentChangeKind::AnimationStructure);
+				// The brush goes on painting with the animated tiles it had, those after the removed one moved down
+				for (TileRef& tile : s->GetStamp().Tiles) {
+					remap(tile);
 				}
-				DocumentChanges changes;
-				command->End(document, changes);
-				s->Execute(std::move(command));
-				selection->Animation = std::max(0, std::min(index, std::int32_t(document.Animations.size()) - 1));
+				selection->Animation = std::max<std::int32_t>(0, std::min<std::int32_t>(index, std::int32_t(document.Animations.size()) - 1));
 				selection->Frame = 0;
 			});
 			remove->IsEnabledFunc = hasAnimation;
-			remove->Tooltip = _("Removes the animated tile, tiles showing it show its first frame instead");
+			remove->Tooltip = _x("editor", "Removes the animated tile, tiles showing it show its first frame instead");
 			auto* paint = buttons->Add<UiButton>(StringView(), EditorIcon::Brush, [s, selection]() {
 				if (selection->Animation < std::int32_t(s->GetDocument().Animations.size())) {
 					s->SetStamp(TileStamp::FromTile(TileRef{ std::uint16_t(selection->Animation), TileRef::Animated, 0 }));
@@ -643,10 +774,11 @@ namespace Jazz2::Editor
 				}
 			});
 			paint->IsEnabledFunc = hasAnimation;
-			paint->Tooltip = _("Paints with the animated tile");
+			paint->Tooltip = _x("editor", "Paints with the animated tile");
 		}
 
-		right->Add<UiLabel>(_("Frames"), UiTheme::TextHeader);
+		// TRANSLATORS: Header of the frames of the selected animated tile in the Animated Tiles dialog, noun
+		right->Add<UiLabel>(_x("editor", "Frames"), UiTheme::TextHeader);
 		auto* frames = right->Add<TileListGrid>(session, [s, selection]() {
 			const auto& animations = s->GetDocument().Animations;
 			return (selection->Animation < std::int32_t(animations.size()) ? std::int32_t(animations[selection->Animation].Frames.size()) : 0);
@@ -662,12 +794,14 @@ namespace Jazz2::Editor
 		{
 			auto* buttons = right->Add<UiStack>(UiOrientation::Horizontal, UiTheme::Spacing);
 			buttons->IsVisibleFunc = hasAnimation;
-			auto* add = buttons->Add<UiButton>(_("Add Brush"), EditorIcon::Plus, [s, selection]() {
+			// TRANSLATORS: Button in the Animated Tiles dialog, adds the tiles of the brush as frames of the animated tile
+			auto* add = buttons->Add<UiButton>(_x("editor", "Add Brush"), EditorIcon::Plus, [s, selection]() {
 				// The tiles of the brush follow the selected frame
 				std::int32_t index = selection->Animation;
 				const TileStamp& stamp = s->GetStamp();
 				std::int32_t added = 0;
-				ChangeAnimation(*s, index, N_("Add frames"), [&stamp, selection, index, &added](DocumentAnimation& animation) {
+				// TRANSLATORS: Name of an undo step in the history, frames added to an animated tile
+				ChangeAnimation(*s, index, _x("editor", "Add frames"), [&stamp, selection, index, &added](DocumentAnimation& animation) {
 					std::int32_t at = std::min(selection->Frame + 1, std::int32_t(animation.Frames.size()));
 					for (std::size_t i = 0; i < stamp.Tiles.size() && animation.Frames.size() < UINT8_MAX; i++) {
 						const TileRef& tile = stamp.Tiles[i];
@@ -681,9 +815,10 @@ namespace Jazz2::Editor
 					selection->Frame += added;
 				}
 			});
-			add->Tooltip = _("Adds the tiles of the brush after the selected frame");
+			add->Tooltip = _x("editor", "Adds the tiles of the brush after the selected frame");
 			auto* remove = buttons->Add<UiButton>(StringView(), EditorIcon::Delete, [s, selection]() {
-				ChangeAnimation(*s, selection->Animation, N_("Remove frame"), [selection](DocumentAnimation& animation) {
+				// TRANSLATORS: Name of an undo step in the history, a frame removed from an animated tile
+				ChangeAnimation(*s, selection->Animation, _x("editor", "Remove frame"), [selection](DocumentAnimation& animation) {
 					// At least one frame stays
 					if (animation.Frames.size() > 1 && selection->Frame < std::int32_t(animation.Frames.size())) {
 						animation.Frames.erase(animation.Frames.begin() + selection->Frame);
@@ -692,13 +827,14 @@ namespace Jazz2::Editor
 				const auto& animations = s->GetDocument().Animations;
 				selection->Frame = std::min(selection->Frame, std::int32_t(animations[selection->Animation].Frames.size()) - 1);
 			});
-			remove->Tooltip = _("Removes the selected frame");
+			remove->Tooltip = _x("editor", "Removes the selected frame");
 			for (std::int32_t direction : { -1, 1 }) {
 				auto* move = buttons->Add<UiButton>(StringView(), direction < 0 ? EditorIcon::ChevronLeft : EditorIcon::ChevronRight, [s, selection, direction]() {
 					std::int32_t from = selection->Frame;
 					std::int32_t to = from + direction;
 					bool moved = false;
-					ChangeAnimation(*s, selection->Animation, N_("Move frame"), [from, to, &moved](DocumentAnimation& animation) {
+					// TRANSLATORS: Name of an undo step in the history, a frame of an animated tile moved earlier or later
+					ChangeAnimation(*s, selection->Animation, _x("editor", "Move frame"), [from, to, &moved](DocumentAnimation& animation) {
 						if (from >= 0 && to >= 0 && from < std::int32_t(animation.Frames.size()) && to < std::int32_t(animation.Frames.size())) {
 							std::swap(animation.Frames[from], animation.Frames[to]);
 							moved = true;
@@ -708,82 +844,94 @@ namespace Jazz2::Editor
 						selection->Frame = to;
 					}
 				});
-				move->Tooltip = (direction < 0 ? _("Moves the selected frame earlier") : _("Moves the selected frame later"));
+				move->Tooltip = (direction < 0 ? _x("editor", "Moves the selected frame earlier") : _x("editor", "Moves the selected frame later"));
 			}
 		}
 
 		auto* timing = right->Add<UiForm>();
 		timing->IsVisibleFunc = hasAnimation;
-		AddAnimationNumber(timing, session, selection, _("Frame time"), _("How many frames of the game each frame is shown for, at 60 a second"),
+		// TRANSLATORS: Label of a property in the Animated Tiles dialog, how long each frame is shown, and its tooltip
+		AddAnimationNumber(timing, session, selection, _x("editor", "Frame time"), _x("editor", "How many frames of the game each frame is shown for, at 60 a second"),
 			&Formats::AnimatedTileRecord::FrameDuration16, 16.0f, 0.25f, 2);
-		AddAnimationNumber(timing, session, selection, _("Delay"), _("Frames the last frame stays before the animation starts again"),
+		// TRANSLATORS: Label of a property in the Animated Tiles dialog, a pause before the animation starts again, noun
+		AddAnimationNumber(timing, session, selection, _x("editor", "Delay"), _x("editor", "Frames the last frame stays before the animation starts again"),
 			&Formats::AnimatedTileRecord::Delay, 1.0f, 1.0f, 0);
-		AddAnimationNumber(timing, session, selection, _("Random delay"), _("Up to this many frames are added to the delay at random"),
+		// TRANSLATORS: Label of a property in the Animated Tiles dialog, a random part added to the delay, noun
+		AddAnimationNumber(timing, session, selection, _x("editor", "Random delay"), _x("editor", "Up to this many frames are added to the delay at random"),
 			&Formats::AnimatedTileRecord::DelayJitter, 1.0f, 1.0f, 0);
-		timing->Add<UiCheckBox>(_("Forward and back"), [s, selection]() {
+		// TRANSLATORS: Checkbox in the Animated Tiles dialog, the animation plays forward and then backward (ping-pong)
+		timing->Add<UiCheckBox>(_x("editor", "Forward and back"), [s, selection]() {
 			const auto& animations = s->GetDocument().Animations;
 			return (selection->Animation < std::int32_t(animations.size()) && animations[selection->Animation].Timing.IsPingPong != 0);
 		}, [s, selection](bool value) {
-			ChangeAnimation(*s, selection->Animation, N_("Animation timing"), [value](DocumentAnimation& animation) {
+			ChangeAnimation(*s, selection->Animation, _x("editor", "Animation timing"), [value](DocumentAnimation& animation) {
 				animation.Timing.IsPingPong = (value ? 1 : 0);
 			});
 		});
-		AddAnimationNumber(timing, session, selection, _("Turn delay"), _("Frames the last frame stays before playing back"),
+		// TRANSLATORS: Label of a property in the Animated Tiles dialog, a pause before the animation turns to play backward, noun
+		AddAnimationNumber(timing, session, selection, _x("editor", "Turn delay"), _x("editor", "Frames the last frame stays before playing back"),
 			&Formats::AnimatedTileRecord::PingPongDelay, 1.0f, 1.0f, 0);
-
-		dialog->AddButton(_("Close"), [dialogPtr]() { dialogPtr->Close(); }, true);
 
 		// Tiles to add are picked in the panel below while it's open
 		UiOverlayOptions options;
 		options.Centered = true;
 		options.Modal = false;
 		options.CloseOnOutsideClick = false;
-		surface->PushOverlay(std::move(dialog), std::move(options));
+		ShowSingleDialog(session, "animatedTiles", Death::move(dialog), Death::move(options));
 	}
 
-	void ShowLevelPropertiesDialog(EditorSession& session)
+	void ShowLevelPropertiesDialog(IEditorContext& session)
 	{
 		UiSurface* surface = session.GetSurface();
 		if (surface == nullptr) {
 			return;
 		}
 
-		EditorSession* s = &session;
-		auto dialog = std::make_unique<UiDialog>(_("Level Properties"));
-		UiDialog* dialogPtr = dialog.get();
-		// Scrolled, it doesn't fit on a small screen
+		IEditorContext* s = &session;
+		// TRANSLATORS: Title of the dialog with the properties of the level
+		auto dialog = std::make_unique<UiDialog>(_x("editor", "Level Properties"));
+		// As large as the screen allows, scrolled only if it doesn't fit, as on a small screen
+		dialog->MaxScreenHeightFraction = 0.85f;
+		dialog->MinScreenWidthFraction = 0.6f;
 		auto* scroll = dialog->GetContent()->Add<UiScrollView>();
-		scroll->Height = 240.0f;
+		scroll->Flex = 1.0f;
 		UiForm* content = scroll->SetContent<UiForm>(UiTheme::Spacing, UiThickness(0.0f, 0.0f, 4.0f, 0.0f));
 
-		AddTextProperty(content, session, _("Name"), &Formats::LevelProperties::DisplayName);
+		// TRANSLATORS: Label of the name of the level shown in the game in the Level Properties dialog
+		AddTextProperty(content, session, _x("editor", "Name"), &Formats::LevelProperties::DisplayName);
 		{
 			// The player name of the options, as a new level gets it
-			auto* row = AddTextProperty(content, session, _("Author"), &Formats::LevelProperties::Author, _("unknown"));
+			// TRANSLATORS: Label of the author of the level in the Level Properties dialog, and the placeholder of its empty box
+			auto* row = AddTextProperty(content, session, _x("editor", "Author"), &Formats::LevelProperties::Author, _x("editor", "unknown"));
 			// TRANSLATORS: Button next to the author of a level, puts the player name there
-			auto* me = row->Add<UiButton>(_("Me"), EditorIcon::None, [s]() {
+			auto* me = row->Add<UiButton>(_x("editor", "Me"), EditorIcon::None, [s]() {
 				SetTextProperty(*s, &Formats::LevelProperties::Author, PreferencesCache::GetEffectivePlayerName());
 			});
-			me->Tooltip = _("Your player name, as set in the options");
+			me->Tooltip = _x("editor", "Your player name, as set in the options");
 		}
-		AddLevelProperty(content, session, _("Next level"), &Formats::LevelProperties::NextLevel, _("episode/level"));
-		AddLevelProperty(content, session, _("Secret level"), &Formats::LevelProperties::SecretLevel);
-		AddLevelProperty(content, session, _("Bonus level"), &Formats::LevelProperties::BonusLevel);
-		AddMusicProperty(content, session, _("Music"), &Formats::LevelProperties::Music, _("file name"));
+		// TRANSLATORS: Label in the Level Properties dialog, and the placeholder of its empty box showing how a level of another episode is written
+		AddLevelProperty(content, session, _x("editor", "Next level"), &Formats::LevelProperties::NextLevel, _x("editor", "episode/level"));
+		AddLevelProperty(content, session, _x("editor", "Secret level"), &Formats::LevelProperties::SecretLevel);
+		AddLevelProperty(content, session, _x("editor", "Bonus level"), &Formats::LevelProperties::BonusLevel);
+		// TRANSLATORS: Label in the Level Properties dialog, and the placeholder of its empty box
+		AddMusicProperty(content, session, _x("editor", "Music"), &Formats::LevelProperties::Music, _x("editor", "file name"));
 		{
-			auto* row = AddRow(content, _("Tile set"));
+			// TRANSLATORS: Label of the default tile set of the level in the Level Properties dialog
+			auto* row = AddRow(content, _x("editor", "Tile set"));
 			auto* label = row->Add<UiLabel>();
 			label->TextFunc = [s]() { return s->GetDocument().Properties.DefaultTileSet; };
 		}
 
 		content->Add<UiSeparator>();
 		{
-			auto* row = AddRow(content, _("Light"));
+			// TRANSLATORS: Label of the light intensity of the level in the Level Properties dialog, noun
+			auto* row = AddRow(content, _x("editor", "Light"));
 			AddColorByte(row, session, 3);
-			row->Add<UiLabel>(_("of 255"), UiTheme::TextDim);
+			// TRANSLATORS: After the number of the light intensity in the Level Properties dialog, 255 is the highest value
+			row->Add<UiLabel>(_x("editor", "of 255"), UiTheme::TextDim);
 		}
 		{
-			auto* row = AddRow(content, _("Ambient color"));
+			auto* row = AddRow(content, _x("editor", "Ambient color"));
 			auto getColor = [s]() {
 				std::uint32_t color = s->GetDocument().Properties.AmbientColor;
 				return Colorf((color & 0xFF) / 255.0f, ((color >> 8) & 0xFF) / 255.0f, ((color >> 16) & 0xFF) / 255.0f, 1.0f);
@@ -793,62 +941,55 @@ namespace Jazz2::Editor
 				if (surface == nullptr) {
 					return;
 				}
+				// All picked while the picker is open is a single step, which starts here
+				s->GetHistory().BreakMerge();
 				UiColorPicker::ShowPopup(*surface, surface->GetPointerPos(), getColor, [s](const Colorf& color) {
 					std::uint32_t rgb = std::uint32_t(std::round(color.R * 255.0f)) | (std::uint32_t(std::round(color.G * 255.0f)) << 8) |
 						(std::uint32_t(std::round(color.B * 255.0f)) << 16);
 					ChangeProperties(*s, [rgb](LevelFlags&, Formats::LevelProperties& properties) {
 						// The light intensity in the highest byte stays
 						properties.AmbientColor = (properties.AmbientColor & 0xFF000000u) | rgb;
-					});
+					}, false);
 				});
-			})->Tooltip = _("Pick a color");
+			})->Tooltip = _x("editor", "Pick a color");
 			for (std::int32_t i = 0; i < 3; i++) {
 				AddColorByte(row, session, i);
 			}
 		}
 		{
-			struct WeatherOption { const char* Label; WeatherType Type; };
-			static const WeatherOption WeatherOptions[] = {
-				{ N_("None"), WeatherType::None },
-				{ N_("Snow"), WeatherType::Snow },
-				{ N_("Flowers"), WeatherType::Flowers },
-				{ N_("Rain"), WeatherType::Rain },
-				{ N_("Leaves"), WeatherType::Leaf },
+			static const PropertyChoice WeatherChoices[] = {
+				// TRANSLATORS: Choice of the weather of the level in the Level Properties dialog, no weather
+				{ _x("editor", "None"), std::int32_t(WeatherType::None) },
+				// Kinds of weather aren't translated
+				{ "Snow", std::int32_t(WeatherType::Snow) },
+				{ "Flowers", std::int32_t(WeatherType::Flowers) },
+				{ "Rain", std::int32_t(WeatherType::Rain) },
+				{ "Leaves", std::int32_t(WeatherType::Leaf) },
 			};
-			auto* row = AddRow(content, _("Weather"));
-			auto* dropdown = row->Add<UiDropdown>([s]() {
-				std::uint8_t type = s->GetDocument().Properties.Weather & ~std::uint8_t(WeatherType::OutdoorsOnly);
-				for (const WeatherOption& option : WeatherOptions) {
-					if (std::uint8_t(option.Type) == type) {
-						return String(_(option.Label));
-					}
-				}
-				return String(_("Unknown"));
-			}, [s](SmallVectorImpl<UiMenuEntry>& entries) {
-				for (const WeatherOption& option : WeatherOptions) {
-					std::uint8_t type = std::uint8_t(option.Type);
-					UiMenuEntry entry;
-					entry.Label = _(option.Label);
-					entry.IsChecked = [s, type]() { return ((s->GetDocument().Properties.Weather & ~std::uint8_t(WeatherType::OutdoorsOnly)) == type); };
-					entry.Execute = [s, type]() {
-						ChangeProperties(*s, [type](LevelFlags&, Formats::LevelProperties& properties) {
-							properties.Weather = std::uint8_t((properties.Weather & std::uint8_t(WeatherType::OutdoorsOnly)) | type);
-						});
-					};
-					entries.push_back(std::move(entry));
-				}
+			// TRANSLATORS: Label of a property in the Level Properties dialog
+			auto* row = AddRow(content, _x("editor", "Weather"));
+			auto* dropdown = AddChoiceDropdown(row, WeatherChoices, [s]() {
+				return std::int32_t(s->GetDocument().Properties.Weather & ~std::uint8_t(WeatherType::OutdoorsOnly));
+			}, [s](std::int32_t value) {
+				std::uint8_t type = std::uint8_t(value);
+				ChangeProperties(*s, [type](LevelFlags&, Formats::LevelProperties& properties) {
+					properties.Weather = std::uint8_t((properties.Weather & std::uint8_t(WeatherType::OutdoorsOnly)) | type);
+				});
+			}, [](std::int32_t) {
+				// TRANSLATORS: In the Level Properties dialog for a weather the editor doesn't know
+				return String(_x("editor", "Unknown"));
 			});
 			dropdown->Width = 80.0f;
-			auto* intensity = row->Add<UiNumberBox>([s]() {
-				return float(s->GetDocument().Properties.WeatherIntensity);
-			}, [s](float value, bool final) {
-				std::uint8_t intensity = std::uint8_t(std::clamp<std::int32_t>(std::int32_t(std::round(value)), 0, 255));
-				ChangeProperties(*s, [intensity](LevelFlags&, Formats::LevelProperties& properties) { properties.WeatherIntensity = intensity; });
-			}, 0.0f, 255.0f, 1.0f, 0);
+			auto* intensity = AddByteBox(row, [s]() {
+				return s->GetDocument().Properties.WeatherIntensity;
+			}, [s](std::uint8_t intensity, bool final) {
+				ChangeProperties(*s, [intensity](LevelFlags&, Formats::LevelProperties& properties) { properties.WeatherIntensity = intensity; }, final);
+			});
 			intensity->Width = 40.0f;
-			intensity->Tooltip = _("Intensity");
+			// TRANSLATORS: Tooltip of the number next to the weather in the Level Properties dialog, how strong the weather is
+			intensity->Tooltip = _x("editor", "Intensity");
 		}
-		content->Add<UiCheckBox>(_("Weather only outdoors"), [s]() {
+		content->Add<UiCheckBox>(_x("editor", "Weather only outdoors"), [s]() {
 			return (s->GetDocument().Properties.Weather & std::uint8_t(WeatherType::OutdoorsOnly)) != 0;
 		}, [s](bool value) {
 			ChangeProperties(*s, [value](LevelFlags&, Formats::LevelProperties& properties) {
@@ -856,63 +997,65 @@ namespace Jazz2::Editor
 			});
 		});
 		{
-			auto* row = AddRow(content, String(_("Water level") + " ("_s + _("px") + ")"_s));
+			// TRANSLATORS: Label of the height of the water in the Level Properties dialog, and the unit after it, short for pixels
+			auto* row = AddRow(content, String(_x("editor", "Water level") + " ("_s + _x("editor", "px") + ")"_s));
 			auto* number = row->Add<UiNumberBox>([s]() {
 				return float(s->GetDocument().Properties.WaterLevel);
 			}, [s](float value, bool final) {
 				std::uint16_t level = std::uint16_t(std::clamp<std::int32_t>(std::int32_t(std::round(value)), 0, 65535));
-				ChangeProperties(*s, [level](LevelFlags&, Formats::LevelProperties& properties) { properties.WaterLevel = level; });
+				ChangeProperties(*s, [level](LevelFlags&, Formats::LevelProperties& properties) { properties.WaterLevel = level; }, final);
 			}, 0.0f, 65535.0f, 4.0f, 0);
 			number->Width = 60.0f;
-			number->Tooltip = _("From the top of the level, below the level means no water");
+			number->Tooltip = _x("editor", "From the top of the level, below the level means no water");
 		}
 		{
-			auto* row = AddRow(content, _("Caption tile"));
+			// TRANSLATORS: Label in the Level Properties dialog, the tile whose colors light up an RGB keyboard while the level is played
+			auto* row = AddRow(content, _x("editor", "Caption tile"));
 			row->Add<TilePreview>(session, [s]() { return std::int32_t(s->GetDocument().Properties.CaptionTileId); });
 			auto* number = row->Add<UiNumberBox>([s]() {
 				return float(s->GetDocument().Properties.CaptionTileId);
 			}, [s](float value, bool final) {
 				std::uint16_t tileId = std::uint16_t(std::clamp<std::int32_t>(std::int32_t(std::round(value)), 0, 65535));
-				ChangeProperties(*s, [tileId](LevelFlags&, Formats::LevelProperties& properties) { properties.CaptionTileId = tileId; });
+				ChangeProperties(*s, [tileId](LevelFlags&, Formats::LevelProperties& properties) { properties.CaptionTileId = tileId; }, final);
 			}, 0.0f, 65535.0f, 1.0f, 0);
 			number->Width = 60.0f;
-			number->Tooltip = _("Tile of the default tile set whose colors light up an RGB keyboard while the level is played");
+			number->Tooltip = _x("editor", "Tile of the default tile set whose colors light up an RGB keyboard while the level is played");
 			auto* fromBrush = row->Add<UiButton>(StringView(), EditorIcon::Brush, [s]() {
 				// The top left tile of the brush, the caption is always a tile of the default tile set
 				const TileStamp& stamp = s->GetStamp();
 				if (stamp.IsEmpty() || stamp.Tiles[0].Source != TileRef::DefaultTileSet) {
-					s->ShowMessage(_("The brush has to start with a tile of the default tile set"));
+					s->ShowMessage(_x("editor", "The brush has to start with a tile of the default tile set"));
 					return;
 				}
 				std::uint16_t tileId = stamp.Tiles[0].Index;
 				ChangeProperties(*s, [tileId](LevelFlags&, Formats::LevelProperties& properties) { properties.CaptionTileId = tileId; });
 			});
-			fromBrush->Tooltip = _("Use the tile of the brush");
+			fromBrush->Tooltip = _x("editor", "Use the tile of the brush");
 			auto* automatic = row->Add<UiButton>(_("Auto"), EditorIcon::None, [s]() {
 				std::int32_t tileId = PickCaptionTile(*s);
 				if (tileId < 0) {
-					s->ShowMessage(_("The level uses no tile of its tile set that has colors"));
+					s->ShowMessage(_x("editor", "The level uses no tile of its tile set that has colors"));
 					return;
 				}
 				ChangeProperties(*s, [tileId](LevelFlags&, Formats::LevelProperties& properties) { properties.CaptionTileId = std::uint16_t(tileId); });
 			});
-			automatic->Tooltip = _("Pick a colorful tile the level uses a lot");
+			automatic->Tooltip = _x("editor", "Pick a colorful tile the level uses a lot");
 		}
 
 		content->Add<UiSeparator>();
-		struct FlagOption { const char* Label; LevelFlags Flag; };
+		struct FlagOption { String Label; LevelFlags Flag; };
+		// Races with laps, Capture the Flag and multiplayer spawn points follow the events, see LevelDocument::GetFlagsFromEvents()
 		static const FlagOption FlagOptions[] = {
-			{ N_("Pit at the bottom"), LevelFlags::HasPit },
-			{ N_("The pit kills at once"), LevelFlags::HasPitInstantDeath },
-			{ N_("Hidden from the list of levels"), LevelFlags::IsHidden },
-			{ N_("Multiplayer level"), LevelFlags::IsMultiplayerLevel },
-			{ N_("Race with laps"), LevelFlags::HasLaps },
-			{ N_("Capture the flag"), LevelFlags::HasCaptureTheFlag },
-			{ N_("Split the screen vertically"), LevelFlags::HasVerticalSplitscreen },
+			// TRANSLATORS: Checkboxes in the Level Properties dialog
+			{ _x("editor", "Pit at the bottom"), LevelFlags::HasPit },
+			{ _x("editor", "The pit kills at once"), LevelFlags::HasPitInstantDeath },
+			{ _x("editor", "Hidden from the list of levels"), LevelFlags::IsHidden },
+			{ _x("editor", "Multiplayer level"), LevelFlags::IsMultiplayerLevel },
+			{ _x("editor", "Split the screen vertically"), LevelFlags::HasVerticalSplitscreen },
 		};
 		for (const FlagOption& option : FlagOptions) {
 			LevelFlags flag = option.Flag;
-			content->Add<UiCheckBox>(_(option.Label), [s, flag]() {
+			content->Add<UiCheckBox>(option.Label, [s, flag]() {
 				return (s->GetDocument().Flags & flag) == flag;
 			}, [s, flag](bool value) {
 				ChangeProperties(*s, [flag, value](LevelFlags& flags, Formats::LevelProperties&) {
@@ -921,66 +1064,99 @@ namespace Jazz2::Editor
 			});
 		}
 
-		dialog->AddButton(_("Close"), [dialogPtr]() { dialogPtr->Close(); }, true);
-
-		UiOverlayOptions options;
-		options.Centered = true;
-		options.Modal = true;
-		options.CloseOnOutsideClick = false;
-		surface->PushOverlay(std::move(dialog), std::move(options));
+		ShowModal(*surface, Death::move(dialog));
 	}
 
-	void ShowLevelTextsDialog(EditorSession& session)
+	void ShowLevelTextsDialog(IEditorContext& session)
 	{
 		UiSurface* surface = session.GetSurface();
 		if (surface == nullptr) {
 			return;
 		}
 
-		EditorSession* s = &session;
-		auto dialog = std::make_unique<UiDialog>(_("Level Texts"));
-		UiDialog* dialogPtr = dialog.get();
+		IEditorContext* s = &session;
+		// TRANSLATORS: Title of the dialog that edits the texts of the level, shown by its events
+		auto dialog = std::make_unique<UiDialog>(_x("editor", "Level Texts"));
+		// As large as the screen allows, the texts are long and a translation is next to each, the list scrolls
+		dialog->MaxScreenHeightFraction = 0.8f;
+		dialog->MinScreenWidthFraction = 0.7f;
 		UiStack* content = dialog->GetContent();
-		content->Add<UiLabel>(_("Events refer to texts by their number, | splits a text into parts"), UiTheme::TextDim);
-		content->Add<UiLabel>(_("Enter breaks a line, Ctrl+Enter confirms, \\f is formatting"), UiTheme::TextDim);
+		content->Add<UiLabel>(_x("editor", "Events refer to texts by their number, | splits a text into parts"), UiTheme::TextDim);
+		content->Add<UiLabel>(_x("editor", "Enter breaks a line, Ctrl+Enter confirms, \\f is formatting"), UiTheme::TextDim);
+		auto language = std::make_shared<LevelTextLanguageState>();
+		AddLevelTextLanguageBar(content, session, language);
+		// What's left between the rows above and the buttons below, which stay
 		auto* scroll = content->Add<UiScrollView>();
-		scroll->Width = 320.0f;
-		scroll->Height = 200.0f;
-		scroll->SetContent<TextsList>(session);
+		scroll->Flex = 1.0f;
+		scroll->SetContent<TextsList>(session, language);
 
 		// In the content, Enter and Escape choose the buttons of the dialog
 		auto* buttons = content->Add<UiStack>(UiOrientation::Horizontal, UiTheme::Spacing);
-		buttons->Add<UiButton>(_("Add Text"), EditorIcon::Plus, [s]() {
+		// TRANSLATORS: Button in the Level Texts dialog
+		buttons->Add<UiButton>(_x("editor", "Add Text"), EditorIcon::Plus, [s]() {
 			LevelDocument& document = s->GetDocument();
 			// Event parameters refer to a text by a byte
 			if (document.Texts.size() >= 256) {
-				s->ShowMessage(_("A level can't have more texts"));
+				s->ShowMessage(_x("editor", "A level can't have more texts"));
 				return;
 			}
-			auto command = SnapshotCommand::Begin(document, SnapshotParts::Texts, _("Add text"));
-			document.Texts.emplace_back();
-			DocumentChanges changes;
-			command->End(document, changes);
-			s->Execute(std::move(command));
+			// TRANSLATORS: Name of an undo step in the history, a text added to the level
+			s->RecordSnapshotStep(_x("editor", "Add text"), SnapshotParts::Texts, [](LevelDocument& document) {
+				document.Texts.emplace_back();
+				return true;
+			});
 		});
-		buttons->Add<UiButton>(_("Remove Last"), EditorIcon::Minus, [s]() {
+		// TRANSLATORS: Button in the Level Texts dialog, removes the last text of the level
+		buttons->Add<UiButton>(_x("editor", "Remove Last"), EditorIcon::Minus, [s]() {
 			LevelDocument& document = s->GetDocument();
 			if (document.Texts.empty()) {
 				return;
 			}
-			auto command = SnapshotCommand::Begin(document, SnapshotParts::Texts, _("Remove text"));
-			document.Texts.pop_back();
-			DocumentChanges changes;
-			command->End(document, changes);
-			s->Execute(std::move(command));
-		});
-		dialog->AddButton(_("Close"), [dialogPtr]() { dialogPtr->Close(); }, true);
+			std::size_t count = document.Texts.size();
+			auto removeLast = [s, count]() {
+				LevelDocument& document = s->GetDocument();
+				// Only if it's still the text that was asked about
+				if (document.Texts.size() != count) {
+					return;
+				}
+				// TRANSLATORS: Name of an undo step in the history, the last text of the level removed
+				s->RecordSnapshotStep(_x("editor", "Remove text"), SnapshotParts::Texts, [](LevelDocument& document) {
+					document.Texts.pop_back();
+					return true;
+				});
+			};
 
-		UiOverlayOptions options;
-		options.Centered = true;
-		options.Modal = true;
-		options.CloseOnOutsideClick = false;
-		surface->PushOverlay(std::move(dialog), std::move(options));
+			// Events that show it would show nothing, and a text with something in it is asked about too
+			std::int32_t index = std::int32_t(count) - 1;
+			std::int32_t users = 0;
+			auto countUser = [index, &users](const Formats::EventRecord& event) {
+				if (const EventParamField* field = FindEventField(EventCatalog::Find(EventType(event.Type), event.Params), ParamType::TextId)) {
+					users += (EventCatalog::ReadField(event, *field) == index ? 1 : 0);
+				}
+			};
+			for (const DocumentEvent& event : document.Events) {
+				countUser(event.Record);
+			}
+			for (const Formats::OffGridEventRecord& event : document.OffGridEvents) {
+				countUser(event.Event);
+			}
+			UiSurface* surface = s->GetSurface();
+			if ((users == 0 && document.Texts[index].empty()) || surface == nullptr) {
+				removeLast();
+				return;
+			}
+			String text = (users > 0 ? _fnx("editor", "Text {} is shown by {} event, it would show nothing. Remove it anyway?",
+				"Text {} is shown by {} events, they would show nothing. Remove it anyway?", users, index, users)
+				: _fx("editor", "Remove text {} with all it says?", index));
+			// TRANSLATORS: Title and buttons of the message confirming that the last text of the level is removed
+			UiMessageDialog::Show(*surface, _x("editor", "Remove Text"), text, { _x("editor", "Remove"), _x("editor", "Cancel") }, [removeLast](std::int32_t button) {
+				if (button == 0) {
+					removeLast();
+				}
+			});
+		});
+
+		ShowModal(*surface, Death::move(dialog));
 	}
 }
 

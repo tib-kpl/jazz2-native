@@ -19,7 +19,7 @@ namespace Jazz2::Editor
 	}
 
 	TilePixelTool::TilePixelTool(IToolHost& host)
-		: EditorTool(host), _tileId(-1), _painting(false), _button(MouseButton::Left), _lastPixel(-1, -1)
+		: EditorTool(host), _tileId(-1), _painting(false), _button(MouseButton::Left), _lastPixel(-1, -1), _lastCell(INT32_MIN, INT32_MIN)
 	{
 	}
 
@@ -31,7 +31,7 @@ namespace Jazz2::Editor
 	void TilePixelTool::SetTarget(std::int32_t tileId, PaintFunction&& paint)
 	{
 		_tileId = tileId;
-		_paint = std::move(paint);
+		_paint = Death::move(paint);
 		_painting = false;
 	}
 
@@ -66,8 +66,8 @@ namespace Jazz2::Editor
 			return false;
 		}
 		// Where in the cell, then where in the tile, which the cell may show flipped
-		std::int32_t x = std::clamp(std::int32_t(std::floor(pointer.World.X - view.Origin.X)) - pointer.Cell.X * TileSize, 0, TileSize - 1);
-		std::int32_t y = std::clamp(std::int32_t(std::floor(pointer.World.Y - view.Origin.Y)) - pointer.Cell.Y * TileSize, 0, TileSize - 1);
+		std::int32_t x = std::clamp<std::int32_t>(std::int32_t(std::floor(pointer.World.X - view.Origin.X)) - pointer.Cell.X * TileSize, 0, TileSize - 1);
+		std::int32_t y = std::clamp<std::int32_t>(std::int32_t(std::floor(pointer.World.Y - view.Origin.Y)) - pointer.Cell.Y * TileSize, 0, TileSize - 1);
 		if ((flags & Formats::TileRecord::FlipX) != 0) {
 			x = TileSize - 1 - x;
 		}
@@ -85,13 +85,14 @@ namespace Jazz2::Editor
 		}
 		Vector2i pixel;
 		if (!GetPixel(pointer, pixel)) {
-			_host.ShowMessage(_("Paint over a tile outlined in the level, it shows the tile being edited"));
+			_host.ShowMessage(_x("editor", "Paint over a tile outlined in the level, it shows the tile being edited"));
 			return;
 		}
 		_painting = true;
 		_button = pointer.Button;
 		_lastPixel = pixel;
-		_paint(pixel, _button, false);
+		_lastCell = pointer.Cell;
+		_paint(pixel, pixel, _button, false);
 	}
 
 	void TilePixelTool::OnPointerMove(const ToolPointer& pointer)
@@ -100,10 +101,14 @@ namespace Jazz2::Editor
 			return;
 		}
 		Vector2i pixel;
-		if (GetPixel(pointer, pixel) && pixel != _lastPixel) {
-			_lastPixel = pixel;
-			_paint(pixel, _button, true);
+		if (!GetPixel(pointer, pixel) || (pixel == _lastPixel && pointer.Cell == _lastCell)) {
+			return;
 		}
+		// Within the same cell the pixels between are painted too, another place of the tile starts anew
+		Vector2i from = (pointer.Cell == _lastCell ? _lastPixel : pixel);
+		_lastPixel = pixel;
+		_lastCell = pointer.Cell;
+		_paint(from, pixel, _button, true);
 	}
 
 	void TilePixelTool::OnPointerUp(const ToolPointer& pointer)
@@ -167,7 +172,7 @@ namespace Jazz2::Editor
 
 	StringView TilePixelTool::GetHint() const
 	{
-		return _("Paint the pixels of the tile right in the level, everywhere it's seen changes - right-click erases");
+		return _x("editor", "Paint the pixels of the tile right in the level, everywhere it's seen changes - right-click erases");
 	}
 }
 

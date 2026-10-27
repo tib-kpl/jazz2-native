@@ -250,8 +250,11 @@ namespace Jazz2::Multiplayer
 		}
 
 		if (_isServer) {
-			// Only the server validates the assets of its peers, a client would only checksum its own copies for nothing
-			InitializeRequiredAssets();
+			// Only the server validates the assets of its peers, a client would only checksum its own copies for nothing,
+			// and so would a local splitscreen session, which has no remote peers at all
+			if (!IsLocalSession()) {
+				InitializeRequiredAssets();
+			}
 
 			// Reserve first 255 indices for players
 			auto& serverConfig = _networkManager->GetServerConfiguration();
@@ -478,7 +481,9 @@ namespace Jazz2::Multiplayer
 	{
 		LevelHandler::OnEndFrame();
 
-		float timeMult = theApplication().GetTimeMult();
+		// The clock of the round, the countdowns and the polls go by the time of the level, which a play-test of the level
+		// editor may slow down or stop
+		float timeMult = GetLevelTimeMult();
 		std::uint32_t frameCount = theApplication().GetFrameCount();
 		auto& serverConfig = _networkManager->GetServerConfiguration();
 
@@ -604,6 +609,7 @@ namespace Jazz2::Multiplayer
 						} else {
 							_levelState = LevelState::PreGame;
 							_gameTimeLeft = serverConfig.PreGameSecs * FrameTimer::FramesPerSecond;
+							// TRANSLATORS: Message shown to all players in multiplayer when the pre-game phase of a round starts, keep the leading line breaks
 							ShowAlertToAllPlayers(_("\n\nThe game will begin shortly!"));
 						}
 
@@ -788,6 +794,7 @@ namespace Jazz2::Multiplayer
 						}
 
 						if (hasChampion) {
+							// TRANSLATORS: Message shown to all players in multiplayer when a player reaches the target points of the whole playlist, {} is player name, keep the leading line breaks
 							ShowAlertToAllPlayers(_f("\n\n{} won the championship!", championName));
 							LOGW("Champion is \"{}\" [{}] ({} points)", championName, championPeerRef, championPoints);
 
@@ -824,7 +831,7 @@ namespace Jazz2::Multiplayer
 								PrepareNextLevelInitialization(levelInit);
 								levelInit.LevelName = _levelName;
 								levelInit.LastExitType = ExitType::Normal;
-								HandleLevelChange(std::move(levelInit));
+								HandleLevelChange(Death::move(levelInit));
 							}
 						} else if (serverConfig.Playlist.size() > 1) {
 							serverConfig.PlaylistIndex++;
@@ -841,7 +848,7 @@ namespace Jazz2::Multiplayer
 							PrepareNextLevelInitialization(levelInit);
 							levelInit.LevelName = _levelName;
 							levelInit.LastExitType = ExitType::Normal;
-							HandleLevelChange(std::move(levelInit));
+							HandleLevelChange(Death::move(levelInit));
 						}
 					}
 					break;
@@ -1632,7 +1639,7 @@ namespace Jazz2::Multiplayer
 		}
 
 		levelInit.IsLocalSession = false;
-		LevelHandler::HandleLevelChange(std::move(levelInit));
+		LevelHandler::HandleLevelChange(Death::move(levelInit));
 	}
 
 	void MpLevelHandler::HandleGameOver(Actors::Player* player)
@@ -2055,9 +2062,9 @@ namespace Jazz2::Multiplayer
 		}
 	}
 
-	void MpLevelHandler::HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count)
+	void MpLevelHandler::HandleCreateSpriteDebris(const Actors::ActorBase* self, AnimState state, std::int32_t count, float elasticity)
 	{
-		LevelHandler::HandleCreateSpriteDebris(self, state, count);
+		LevelHandler::HandleCreateSpriteDebris(self, state, count, elasticity);
 
 		if (_isServer && !_isLocalSession) {
 			std::uint32_t targetActorId = 0;
@@ -2069,11 +2076,13 @@ namespace Jazz2::Multiplayer
 				}
 			}
 			if (targetActorId != 0) {
-				MemoryStream packet(13);
+				MemoryStream packet(17);
 				packet.WriteValue<std::uint8_t>(UINT8_MAX); // Effect
 				packet.WriteVariableUint32(targetActorId);
 				packet.WriteVariableUint32((std::uint32_t)state);
 				packet.WriteVariableInt32(count);
+				// Last, so a peer that doesn't read it stops before it, see HandleServerPacketCreateDebris()
+				packet.WriteValueAsLE<float>(elasticity);
 
 				_networkManager->SendTo([this](const Peer& peer) {
 					auto peerDesc = _networkManager->GetPeerDescriptor(peer);
@@ -2144,19 +2153,23 @@ namespace Jazz2::Multiplayer
 		}
 	}
 
-	void MpLevelHandler::OverrideCameraView(Actors::Player* player, float x, float y, bool topLeft)
+	void MpLevelHandler::OverrideCameraView(Actors::Player* player, CameraOverride modeX, float x, CameraOverride modeY, float y,
+		bool centered, bool instant)
 	{
 		// TODO: Include this state in initial sync
-		LevelHandler::OverrideCameraView(player, x, y, topLeft);
+		LevelHandler::OverrideCameraView(player, modeX, x, modeY, y, centered, instant);
 
 		if (_isServer) {
 			if (auto* mpPlayer = runtime_cast<RemotePlayerOnServer>(player)) {
 				MemoryStream packet(14);
 				packet.WriteValue<std::uint8_t>((std::uint8_t)PlayerPropertyType::OverrideCameraView);
 				packet.WriteVariableUint32(mpPlayer->_playerIndex);
-				packet.WriteVariableInt32((std::int32_t)(x * 100.0f));
-				packet.WriteVariableInt32((std::int32_t)(y * 100.0f));
-				packet.WriteValue<std::uint8_t>(topLeft ? 1 : 0);
+				packet.WriteVariableInt32(modeX == CameraOverride::Fix ? (std::int32_t)(x * 100.0f) : 0);
+				packet.WriteVariableInt32(modeY == CameraOverride::Fix ? (std::int32_t)(y * 100.0f) : 0);
+				// Bit 0 is whether the position is the top left corner of the view, as it always was, the modes of the axes
+				// and whether it's instant are in the bits above it (see OverrideCameraViewModes)
+				packet.WriteValue<std::uint8_t>(std::uint8_t((centered ? 0 : 0x01) | (std::uint8_t(modeX) << 1) | (std::uint8_t(modeY) << 3) |
+					(instant ? 0x20 : 0) | OverrideCameraViewModes));
 				_networkManager->SendTo(mpPlayer->GetPeerDescriptor()->RemotePeer, NetworkChannel::Main, (std::uint8_t)ServerPacketType::PlayerSetProperty, packet);
 			}
 		}
@@ -2356,14 +2369,6 @@ namespace Jazz2::Multiplayer
 
 		return LevelHandler::PlayerExecuteRumble(player, rumbleEffect);
 	}
-
-#if defined(WITH_EDITOR)
-	bool MpLevelHandler::CanOpenInEditor() const
-	{
-		// Only a level played alone can be opened, the editor plays it alone too
-		return false;
-	}
-#endif
 
 	bool MpLevelHandler::SerializeResumableToStream(Stream& dest)
 	{
@@ -2795,12 +2800,7 @@ namespace Jazz2::Multiplayer
 				} else if (variableName == "level"_s) {
 					LevelInitialization levelInit;
 					PrepareNextLevelInitialization(levelInit);
-					auto level = value.partition('/');
-					if (value.contains('/')) {
-						levelInit.LevelName = value;
-					} else {
-						levelInit.LevelName = "unknown/"_s + value;
-					}
+					levelInit.LevelName = ContentResolver::Get().ResolveLevelName(value.trimmed());
 					if (ContentResolver::Get().LevelExists(levelInit.LevelName)) {
 						LOGD("Changing level to \"{}\"", levelInit.LevelName);
 
@@ -2808,7 +2808,7 @@ namespace Jazz2::Multiplayer
 						serverConfig.PlaylistIndex = -1;
 
 						levelInit.LastExitType = ExitType::Normal;
-						HandleLevelChange(std::move(levelInit));
+						HandleLevelChange(Death::move(levelInit));
 					} else {
 						SendMessage(peer, UI::MessageLevel::Confirm, "Level doesn't exist");
 					}
@@ -2920,6 +2920,7 @@ namespace Jazz2::Multiplayer
 					value = value.trimmed();
 					auto intValue = stou32(value.data(), value.size());
 					if (intValue < 2 || intValue > MaxTeamCount) {
+						// TRANSLATORS: Reply in the console to the /set teamcount command of a server admin, {} is the maximum number of teams
 						SendMessage(peer, UI::MessageLevel::Confirm, _f("Value out of range (2-{})", MaxTeamCount));
 						return true;
 					}
@@ -2996,6 +2997,7 @@ namespace Jazz2::Multiplayer
 			} else if (arg == "auto"_s) {
 				requestedTeam = NoPreferredTeam;
 			} else {
+				// TRANSLATORS: Help for the /team command in the console, keep the command and the words in <> as they are
 				SendMessage(peer, UI::MessageLevel::Warning, _("Usage: /team <blue|red|green|yellow|auto>"));
 				return true;
 			}
@@ -3003,6 +3005,7 @@ namespace Jazz2::Multiplayer
 			if (peer) {
 				auto peerDesc = _networkManager->GetPeerDescriptor(peer);
 				if (peerDesc != nullptr && peerDesc->Player != nullptr && ChangePlayerTeam(peerDesc->Player, requestedTeam, false)) {
+					// TRANSLATORS: Message in the console after the player changed team, {} is the team color name in English (Blue, Red, Green or Yellow)
 					SendMessage(peer, UI::MessageLevel::Info, _f("You joined the {} team", GetTeamName(peerDesc->Team)));
 				} else {
 					SendMessage(peer, UI::MessageLevel::Warning, _("Cannot change team right now"));
@@ -3019,6 +3022,7 @@ namespace Jazz2::Multiplayer
 					SendMessage(peer, UI::MessageLevel::Warning, _("Teams are only used in team game modes"));
 				} else {
 					RebalanceTeams(true);
+					// TRANSLATORS: Reply in the console to the /balance command of a server admin
 					SendMessage(peer, UI::MessageLevel::Confirm, _("Teams rebalanced"));
 				}
 			}
@@ -3043,6 +3047,7 @@ namespace Jazz2::Multiplayer
 				} else if (teamStr == "yellow"_s || teamStr == "3"_s) {
 					team = 3;
 				} else {
+					// TRANSLATORS: Help for the /setteam command in the console, keep the command and the team names as they are, <player#> stands for the player number
 					SendMessage(peer, UI::MessageLevel::Warning, _("Usage: /setteam <player#> <blue|red|green|yellow>"));
 					return true;
 				}
@@ -3058,6 +3063,7 @@ namespace Jazz2::Multiplayer
 				}
 
 				if (target != nullptr && ChangePlayerTeam(target, team, true)) {
+					// TRANSLATORS: Reply in the console to the /setteam command of a server admin, first {} is player number, second {} is the team color name in English (Blue, Red, Green or Yellow)
 					SendMessage(peer, UI::MessageLevel::Confirm, _f("Player {} moved to the {} team", targetIndex, GetTeamName(team)));
 				} else {
 					SendMessage(peer, UI::MessageLevel::Warning, _("Player not found"));
@@ -3116,7 +3122,7 @@ namespace Jazz2::Multiplayer
 					if (!levelInit.LevelName.empty() && ContentResolver::Get().LevelExists(levelInit.LevelName)) {
 						LOGD("Skipping to next level \"{}\"", levelInit.LevelName);
 						levelInit.LastExitType = ExitType::Normal;
-						HandleLevelChange(std::move(levelInit));
+						HandleLevelChange(Death::move(levelInit));
 					} else {
 						SendMessage(peer, UI::MessageLevel::Confirm, "No next level is defined for this level");
 					}
@@ -3331,7 +3337,7 @@ namespace Jazz2::Multiplayer
 			}, NetworkChannel::Main, (std::uint8_t)ServerPacketType::ChatMessage, packetOut);
 		}
 
-		InvokeAsync([this, message = std::move(prefixedMessage)]() mutable {
+		InvokeAsync([this, message = Death::move(prefixedMessage)]() mutable {
 			_console->WriteLine(UI::MessageLevel::Info, message);
 		});
 	}
@@ -3843,6 +3849,7 @@ namespace Jazz2::Multiplayer
 				// never announced as connected and has no name yet, so its leaving is not announced either
 				if (wasAuthenticated) {
 					InvokeAsync([this, peerDesc]() mutable {
+						// TRANSLATORS: Message in the console in multiplayer, {} is player name, keep \f[...] formatting as it is
 						_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] disconnected", peerDesc->PlayerName));
 					});
 
@@ -4092,7 +4099,7 @@ namespace Jazz2::Multiplayer
 			std::memcpy(buffer.data(), data.data(), data.size());
 		}
 
-		InvokeAsync([this, peer, buffer = std::move(buffer)]() {
+		InvokeAsync([this, peer, buffer = Death::move(buffer)]() {
 			MemoryStream packet(buffer);
 			std::uint32_t actorId = packet.ReadVariableUint32();
 
@@ -4125,6 +4132,7 @@ namespace Jazz2::Multiplayer
 			peerDesc->LevelState = PeerLevelState::ValidatingAssets;
 
 			InvokeAsync([this, peerDesc]() mutable {
+				// TRANSLATORS: Message in the console in multiplayer, {} is player name, keep \f[...] formatting as it is
 				_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] connected", peerDesc->PlayerName));
 			});
 
@@ -4226,7 +4234,7 @@ namespace Jazz2::Multiplayer
 			if (IsCheatingAllowed(peerDesc->Player)) {
 				// The cheat mutates game state, so it has to run on the main thread, and it affects only the
 				// player that invoked it
-				InvokeAsync([this, peerDesc, line = std::move(line)]() {
+				InvokeAsync([this, peerDesc, line = Death::move(line)]() {
 					if (peerDesc->Player != nullptr) {
 						Actors::Player* targets[] = { peerDesc->Player };
 						_cheatsUsed = true;
@@ -4261,8 +4269,8 @@ namespace Jazz2::Multiplayer
 			webhook->OnChatMessage(peerDesc->PlayerName, line, peerDesc->IsAdmin);
 		}
 
-		InvokeAsync([this, line = std::move(prefixedMessage)]() mutable {
-			_console->WriteLine(UI::MessageLevel::Chat, std::move(line));
+		InvokeAsync([this, line = Death::move(prefixedMessage)]() mutable {
+			_console->WriteLine(UI::MessageLevel::Chat, Death::move(line));
 		});
 		return true;
 	}
@@ -4349,7 +4357,7 @@ namespace Jazz2::Multiplayer
 		}
 		
 #if defined(WITH_THREADS)
-		Thread streamingThread([_this = runtime_cast<MpLevelHandler>(shared_from_this()), peer, peerDesc = std::move(peerDesc), missingAssets = std::move(missingAssets)]() {
+		Thread streamingThread([_this = runtime_cast<MpLevelHandler>(shared_from_this()), peer, peerDesc = Death::move(peerDesc), missingAssets = Death::move(missingAssets)]() {
 #else
 		auto* _this = this;
 #endif
@@ -4788,6 +4796,7 @@ namespace Jazz2::Multiplayer
 				return;
 			}
 			if (ChangePlayerTeam(peerDesc->Player, requestedTeam, false)) {
+				// TRANSLATORS: Message in the console after the player changed team, {} is the team color name in English (Blue, Red, Green or Yellow)
 				SendMessage(peer, UI::MessageLevel::Info, _f("You joined the {} team", GetTeamName(peerDesc->Team)));
 			} else {
 				SendMessage(peer, UI::MessageLevel::Warning, _("Cannot change team right now"));
@@ -4917,10 +4926,12 @@ namespace Jazz2::Multiplayer
 				LOGD("[MP] ServerPacketType::PeerSetProperty - type: {}, peer: 0x{:.8x}, name: \"{}\"",
 					type, peerId, playerName);
 
-				InvokeAsync([this, type, playerName = std::move(playerName)]() mutable {
+				InvokeAsync([this, type, playerName = Death::move(playerName)]() mutable {
 					if (type == PeerPropertyType::Connected) {
+						// TRANSLATORS: Message in the console in multiplayer, {} is player name, keep \f[...] formatting as it is
 						_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] connected", playerName));
 					} else {
+						// TRANSLATORS: Message in the console in multiplayer, {} is player name, keep \f[...] formatting as it is
 						_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] disconnected", playerName));
 					}
 				});
@@ -4940,11 +4951,13 @@ namespace Jazz2::Multiplayer
 				LOGD("[MP] ServerPacketType::PeerSetProperty - type: {}, victim: 0x{:.8x}, victim-name: \"{}\", attacker: 0x{:.8x}, attacker-name: \"{}\"",
 					type, peerId, victimName, attackerPeerId, attackerName);
 
-				InvokeAsync([this, victimName = std::move(victimName), attackerName = std::move(attackerName)]() mutable {
+				InvokeAsync([this, victimName = Death::move(victimName), attackerName = Death::move(attackerName)]() mutable {
 					if (!attackerName.empty()) {
+						// TRANSLATORS: Message in the console in multiplayer when a player is killed by another player, first {} is victim name, second {} is attacker name, keep \f[...] formatting as it is
 						_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] was roasted by \f[c:#d0705d]{}\f[/c]",
 							victimName, attackerName));
 					} else {
+						// TRANSLATORS: Message in the console in multiplayer when a player is killed by an enemy or a hazard (not by another player), {} is player name, keep \f[...] formatting as it is
 						_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] was roasted by environment",
 							victimName));
 					}
@@ -5088,7 +5101,7 @@ namespace Jazz2::Multiplayer
 
 				LOGD("[MP] ServerPacketType::LevelSetProperty::Music - path: \"{}\", flags: {}", path, flags);
 
-				InvokeAsync([this, flags, path = std::move(path)]() {
+				InvokeAsync([this, flags, path = Death::move(path)]() {
 					bool setDefault = (flags & 0x01) != 0;
 					bool forceReload = (flags & 0x02) != 0;
 					BeginPlayMusic(path, setDefault, forceReload);
@@ -5109,7 +5122,7 @@ namespace Jazz2::Multiplayer
 				LOGD("[MP] ServerPacketType::LevelSetProperty::LevelText - textId: {}, length: {}", textId, textLength);
 
 				// Call the base directly - the override only rebroadcasts on a server, but this is the receiving end
-				InvokeAsync([this, textId, text = std::move(text)]() {
+				InvokeAsync([this, textId, text = Death::move(text)]() {
 					LevelHandler::OverrideLevelText(textId, text);
 				});
 				break;
@@ -5192,10 +5205,10 @@ namespace Jazz2::Multiplayer
 			flags, allowedPlayerTypes, welcomeMessage);
 
 		// The welcome message is applied on the main thread too, because the lobby UI reads it there
-		InvokeAsync([this, flags, allowedPlayerTypes, hasWelcomeMessage, welcomeMessage = std::move(welcomeMessage)]() mutable {
+		InvokeAsync([this, flags, allowedPlayerTypes, hasWelcomeMessage, welcomeMessage = Death::move(welcomeMessage)]() mutable {
 			if (hasWelcomeMessage) {
 				auto& serverConfig = _networkManager->GetServerConfiguration();
-				serverConfig.WelcomeMessage = std::move(welcomeMessage);
+				serverConfig.WelcomeMessage = Death::move(welcomeMessage);
 			}
 			if ((flags & 0x01) != 0 && _inGameLobby != nullptr) {
 				_changingCharacterInLobby = false; // Server-driven lobby is the initial join, not a player-initiated change
@@ -5258,7 +5271,7 @@ namespace Jazz2::Multiplayer
 		packet.Read(identifier.data(), identifierLength);
 
 		// TODO: Use only lock here
-		InvokeAsync([this, actorId, flags, gain, pitch, identifier = std::move(identifier)]() {
+		InvokeAsync([this, actorId, flags, gain, pitch, identifier = Death::move(identifier)]() {
 			std::unique_lock lock(_lock);
 			Actors::ActorBase* actor = FindSfxActor(actorId);
 			if (actor == nullptr) {
@@ -5271,7 +5284,7 @@ namespace Jazz2::Multiplayer
 				// The flags go along for the looping, nothing is sent from a client
 				auto player = actor->PlaySfx(identifier, gain, pitch, flags);
 				if (player != nullptr) {
-					_trackedSfx.push_back(TrackedSfx{actorId, String(identifier), std::move(player)});
+					_trackedSfx.push_back(TrackedSfx{actorId, String(identifier), Death::move(player)});
 				}
 				return;
 			}
@@ -5293,7 +5306,7 @@ namespace Jazz2::Multiplayer
 		String identifier = String(NoInit, identifierLength);
 		packet.Read(identifier.data(), identifierLength);
 
-		InvokeAsync([this, actorId, identifier = std::move(identifier)]() {
+		InvokeAsync([this, actorId, identifier = Death::move(identifier)]() {
 			StopTrackedSfx(actorId, identifier);
 		});
 		return true;
@@ -5363,7 +5376,7 @@ namespace Jazz2::Multiplayer
 		packet.Read(identifier.data(), identifierLength);
 
 		// TODO: Use only lock here
-		InvokeAsync([this, posX, posY, gain, pitch, identifier = std::move(identifier)]() {
+		InvokeAsync([this, posX, posY, gain, pitch, identifier = Death::move(identifier)]() {
 			std::unique_lock lock(_lock);
 			PlayCommonSfx(identifier, Vector3f((float)posX, (float)posY, 0.0f), gain, pitch);
 		});
@@ -5385,7 +5398,7 @@ namespace Jazz2::Multiplayer
 
 		LOGD("[MP] ServerPacketType::ShowAlert - text: \"{}\"", text);
 
-		InvokeAsync([this, text = std::move(text)]() mutable {
+		InvokeAsync([this, text = Death::move(text)]() mutable {
 			if (_hud != nullptr) {
 				_hud->ShowLevelText(text);
 			}
@@ -5412,8 +5425,8 @@ namespace Jazz2::Multiplayer
 			level = UI::MessageLevel::Echo;
 		}
 
-		InvokeAsync([this, level, message = std::move(message)]() mutable {
-			_console->WriteLine(level, std::move(message));
+		InvokeAsync([this, level, message = Death::move(message)]() mutable {
+			_console->WriteLine(level, Death::move(message));
 		});
 		return true;
 	}
@@ -5429,10 +5442,13 @@ namespace Jazz2::Multiplayer
 			std::memcpy(buffer.data(), data.data(), data.size());
 		}
 
-		InvokeAsync([this, buffer = std::move(buffer)]() {
+		InvokeAsync([this, buffer = Death::move(buffer)]() {
 			if (auto* tileMap = TileMap()) {
 				MemoryStream packet(buffer);
-				tileMap->InitializeFromStream(packet);
+				if (!tileMap->InitializeFromStream(packet)) {
+					// Checked, the state comes from the server; nothing was applied
+					LOGW("[MP] Tile map state from the server doesn't fit the level");
+				}
 			}
 		});
 		return true;
@@ -5478,12 +5494,20 @@ namespace Jazz2::Multiplayer
 		if (effect == UINT8_MAX) {
 			AnimState state = (AnimState)packet.ReadVariableUint32();
 			std::int32_t count = packet.ReadVariableInt32();
+			// A server of an older version doesn't send the elasticity, the debris bounces as it used to then
+			float elasticity = 0.8f;
+			if (packet.GetSize() - packet.GetPosition() >= std::int64_t(sizeof(float))) {
+				float value = packet.ReadValueAsLE<float>();
+				if (std::isfinite(value)) {
+					elasticity = std::clamp(value, 0.0f, 1.0f);
+				}
+			}
 
-			InvokeAsync([this, actorId, state, count]() {
+			InvokeAsync([this, actorId, state, count, elasticity]() {
 				std::unique_lock lock(_lock);
 				auto it = _remoteActors.find(actorId);
 				if DEATH_LIKELY(it != _remoteActors.end()) {
-					it->second->CreateSpriteDebris(state, count);
+					it->second->CreateSpriteDebris(state, count, elasticity);
 				} else {
 					LOGD("[MP] ServerPacketType::CreateDebris - actorId: {} - Actor not found", actorId);
 				}
@@ -5612,7 +5636,7 @@ namespace Jazz2::Multiplayer
 		//LOGD("Remote actor {} created on [{};{}] with metadata \"{}\"", actorId, posX, posY, metadataPath);
 		LOGD("[MP] ServerPacketType::CreateRemoteActor - actorId: {}, metadata: \"{}\", x: {}, y: {}", actorId, metadataPath, posX, posY);
 
-		InvokeAsync([this, actorId, flags, posX, posY, posZ, state, metadataPath = std::move(metadataPath), anim, rotation, scaleX, scaleY, rendererType, blendingPreset, lights = std::move(lights)]() {
+		InvokeAsync([this, actorId, flags, posX, posY, posZ, state, metadataPath = Death::move(metadataPath), anim, rotation, scaleX, scaleY, rendererType, blendingPreset, lights = Death::move(lights)]() {
 			{
 				std::unique_lock lock(_lock);
 				if (_remoteActors.contains(actorId)) {
@@ -5661,7 +5685,7 @@ namespace Jazz2::Multiplayer
 
 		LOGD("[MP] ServerPacketType::CreateMirroredActor - actorId: {}, event: {}, x: {}, y: {}", actorId, eventType, tileX * 32 + 16, tileY * 32 + 16);
 
-		InvokeAsync([this, actorId, eventType, eventParams = std::move(eventParams), actorFlags, tileX, tileY, posZ]() {
+		InvokeAsync([this, actorId, eventType, eventParams = Death::move(eventParams), actorFlags, tileX, tileY, posZ]() {
 			{
 				std::unique_lock lock(_lock);
 				if (_remoteActors.contains(actorId)) {
@@ -5825,7 +5849,7 @@ namespace Jazz2::Multiplayer
 		lock.unlock();
 
 		if (!pendingLightRanges.empty()) {
-			InvokeAsync([this, pendingLightRanges = std::move(pendingLightRanges), pendingLights = std::move(pendingLights)]() {
+			InvokeAsync([this, pendingLightRanges = Death::move(pendingLightRanges), pendingLights = Death::move(pendingLights)]() {
 				std::unique_lock lock(_lock);
 
 				std::uint32_t offset = 0;
@@ -5864,7 +5888,7 @@ namespace Jazz2::Multiplayer
 
 		LOGD("[MP] ServerPacketType::ChangeRemoteActorMetadata - id: {}, metadata: \"{}\"", actorId, metadataPath);
 
-		InvokeAsync([this, actorId, metadataPath = std::move(metadataPath)]() mutable {
+		InvokeAsync([this, actorId, metadataPath = Death::move(metadataPath)]() mutable {
 			std::unique_lock lock(_lock);
 			auto it = _remoteActors.find(actorId);
 			if DEATH_LIKELY(it != _remoteActors.end()) {
@@ -5900,12 +5924,12 @@ namespace Jazz2::Multiplayer
 
 		LOGD("[MP] ServerPacketType::MarkRemoteActorAsPlayer - actorId: {}, flags: 0x{:.2x}, name: \"{}\"", actorId, flags, playerName);
 
-		InvokeAsync([this, actorId, flags, hasFurColor, furColor, hasTeam, team, playerName = std::move(playerName)]() mutable {
+		InvokeAsync([this, actorId, flags, hasFurColor, furColor, hasTeam, team, playerName = Death::move(playerName)]() mutable {
 			if (actorId == _lastSpawnedActorId) {
 				if (!playerName.empty()) {
 					// Player name is optional, so only set it if it's not empty
 					if (auto peerDesc = _networkManager->GetPeerDescriptor(LocalPeer)) {
-						peerDesc->PlayerName = std::move(playerName);
+						peerDesc->PlayerName = Death::move(playerName);
 					}
 				}
 				if (hasTeam) {
@@ -5917,7 +5941,7 @@ namespace Jazz2::Multiplayer
 				auto it = _playerNames.try_emplace(actorId, PlayerName{});
 				if (!playerName.empty()) {
 					// Player name is optional, so only set it if it's not empty
-					it.first->second.Name = std::move(playerName);
+					it.first->second.Name = Death::move(playerName);
 				}
 				it.first->second.Flags = flags;
 				if (hasTeam) {
@@ -5956,8 +5980,8 @@ namespace Jazz2::Multiplayer
 			positions[i] = { playerIdx, positionInRound, pointsInRound };
 		}
 		// Applied on the main thread, because the HUD iterates the list there
-		InvokeAsync([this, positions = std::move(positions)]() mutable {
-			_positionsInRound = std::move(positions);
+		InvokeAsync([this, positions = Death::move(positions)]() mutable {
+			_positionsInRound = Death::move(positions);
 		});
 		return true;
 	}
@@ -5998,11 +6022,11 @@ namespace Jazz2::Multiplayer
 			markers[i] = Vector2i(x, y);
 		}
 		// Applied on the main thread, because the minimap iterates these lists there
-		InvokeAsync([this, boundsMin, boundsMax, checkpoints = std::move(checkpoints), markers = std::move(markers)]() mutable {
+		InvokeAsync([this, boundsMin, boundsMax, checkpoints = Death::move(checkpoints), markers = Death::move(markers)]() mutable {
 			_minimapBoundsMin = boundsMin;
 			_minimapBoundsMax = boundsMax;
-			_orderedRaceCheckpoints = std::move(checkpoints);
-			_raceStartMarkers = std::move(markers);
+			_orderedRaceCheckpoints = Death::move(checkpoints);
+			_raceStartMarkers = Death::move(markers);
 		});
 		return true;
 	}
@@ -6030,8 +6054,8 @@ namespace Jazz2::Multiplayer
 			}
 		}
 		// Applied on the main thread - UpdateCtfClient() iterates _ctfFlagStates and owns the visual actors there
-		InvokeAsync([this, isCtf, teamScores = std::move(teamScores), flags = std::move(flags)]() mutable {
-			_teamScores = std::move(teamScores);
+		InvokeAsync([this, isCtf, teamScores = Death::move(teamScores), flags = Death::move(flags)]() mutable {
+			_teamScores = Death::move(teamScores);
 			if (isCtf) {
 				// Update state/positions in place, preserving the client-local visual actor pointers
 				if (_ctfFlagStates.size() != flags.size()) {
@@ -6091,18 +6115,18 @@ namespace Jazz2::Multiplayer
 			packet.Read(score.Name.data(), nameLength);
 			score.IsLocal = false;
 			actorIds.push_back(actorId);
-			scoreboard.push_back(std::move(score));
+			scoreboard.push_back(Death::move(score));
 		}
 
 		// IsLocal, sorting and the swap happen on the main thread (_lastSpawnedActorId and _scoreboard are owned there)
-		InvokeAsync([this, scoreboard = std::move(scoreboard), actorIds = std::move(actorIds)]() mutable {
+		InvokeAsync([this, scoreboard = Death::move(scoreboard), actorIds = Death::move(actorIds)]() mutable {
 			for (std::size_t i = 0; i < scoreboard.size(); i++) {
 				scoreboard[i].IsLocal = (actorIds[i] == _lastSpawnedActorId);
 			}
 			nCine::sort(scoreboard.begin(), scoreboard.end(), [](const PlayerScore& a, const PlayerScore& b) {
 				return (a.Points != b.Points ? a.Points > b.Points : a.Kills > b.Kills);
 			});
-			_scoreboard = std::move(scoreboard);
+			_scoreboard = Death::move(scoreboard);
 		});
 		return true;
 	}
@@ -6136,15 +6160,15 @@ namespace Jazz2::Multiplayer
 			result.Name = String(NoInit, nameLength);
 			packet.Read(result.Name.data(), nameLength);
 			result.IsLocal = false;
-			results.push_back(std::move(result));
+			results.push_back(Death::move(result));
 		}
 
 		// IsLocal and the swap happen on the main thread (_lastSpawnedActorId and _roundResults are owned there)
-		InvokeAsync([this, results = std::move(results)]() mutable {
+		InvokeAsync([this, results = Death::move(results)]() mutable {
 			for (auto& result : results) {
 				result.IsLocal = (result.ActorID == _lastSpawnedActorId);
 			}
-			_roundResults = std::move(results);
+			_roundResults = Death::move(results);
 		});
 		return true;
 	}
@@ -6289,7 +6313,7 @@ namespace Jazz2::Multiplayer
 					auto it = _remoteActors.find(playerIndex);
 					if (it != _remoteActors.end()) {
 						if (auto* remoteActor = runtime_cast<Actors::Multiplayer::RemoteActor>(it->second.get())) {
-							remoteActor->SetModifierDecor(std::move(decor));
+							remoteActor->SetModifierDecor(Death::move(decor));
 						}
 					}
 				}
@@ -6427,15 +6451,31 @@ namespace Jazz2::Multiplayer
 				break;
 			}
 			case PlayerPropertyType::OverrideCameraView: {
-				float x = packet.ReadVariableInt32() * 0.01f;
-				float y = packet.ReadVariableInt32() * 0.01f;
-				bool topLeft = packet.ReadValue<std::uint8_t>() != 0;
+				std::int32_t rawX = packet.ReadVariableInt32();
+				std::int32_t rawY = packet.ReadVariableInt32();
+				std::uint8_t flags = packet.ReadValue<std::uint8_t>();
+				CameraOverride modeX, modeY;
+				bool instant;
+				if ((flags & OverrideCameraViewModes) != 0) {
+					modeX = CameraOverride((flags >> 1) & 0x03);
+					modeY = CameraOverride((flags >> 3) & 0x03);
+					instant = ((flags & 0x20) != 0);
+				} else {
+					// A server that sent only the position fixed the camera there, an axis it let go of came as the lowest number
+					modeX = (rawX == INT32_MIN ? CameraOverride::Follow : CameraOverride::Fix);
+					modeY = (rawY == INT32_MIN ? CameraOverride::Follow : CameraOverride::Fix);
+					instant = true;
+				}
+				float x = rawX * 0.01f;
+				float y = rawY * 0.01f;
+				bool centered = ((flags & 0x01) == 0);
 
-				LOGD("[MP] ServerPacketType::PlayerSetProperty::OverrideCameraView - x: {}, y: {}, topLeft: {}", x, y, topLeft);
+				LOGD("[MP] ServerPacketType::PlayerSetProperty::OverrideCameraView - x: {} ({}), y: {} ({}), centered: {}, instant: {}",
+					x, std::int32_t(modeX), y, std::int32_t(modeY), centered, instant);
 
-				InvokeAsync([this, x, y, topLeft]() {
+				InvokeAsync([this, modeX, x, modeY, y, centered, instant]() {
 					if (!_players.empty()) {
-						OverrideCameraView(_players[0], x, y, topLeft);
+						OverrideCameraView(_players[0], modeX, x, modeY, y, centered, instant);
 					}
 				});
 				break;
@@ -6914,7 +6954,7 @@ namespace Jazz2::Multiplayer
 
 	void MpLevelHandler::AttachComponents(LevelDescriptor&& descriptor)
 	{
-		LevelHandler::AttachComponents(std::move(descriptor));
+		LevelHandler::AttachComponents(Death::move(descriptor));
 
 		// Reset minimap geometry for both server and client (the client repopulates it from a server packet,
 		// or leaves it empty so no minimap is shown when the new level has no track)
@@ -6953,7 +6993,7 @@ namespace Jazz2::Multiplayer
 					_totalTreasureCount += count;
 				}
 				return true;
-			});
+			}, true);	// Off-grid ones too, with the tile their position is in
 
 			const auto& serverConfig = _networkManager->GetServerConfiguration();
 
@@ -6980,7 +7020,7 @@ namespace Jazz2::Multiplayer
 						}
 					}
 					return true;
-				});
+				}, true);
 			}
 		} else {
 			// Change InstantDeathPit to FallForever, because player health is managed by the server
@@ -7008,7 +7048,7 @@ namespace Jazz2::Multiplayer
 						break;
 				}
 				return true;
-			});
+			}, true);
 		}
 	}
 
@@ -7048,7 +7088,7 @@ namespace Jazz2::Multiplayer
 			// Checked against the tileset rather than applied blind - see LevelHandler::FindClearSpawnPosition(),
 			// which the single-player path shares. This is the path **local splitscreen co-op actually takes**,
 			// the menu selecting it through `LocalMultiplayerGameMode`, and its 30 px lift buried the second
-			// player in the ceiling wherever a level starts in a tight space. Reported on `rescue/02_colon2`,
+			// player in the ceiling wherever a level starts in a tight space. Reported on `rescue/colon2`,
 			// and it survived a fix to the other handler entirely because a `/level` start does not come
 			// through here at all - the two paths are reached by different routes and look alike.
 			Vector2f playerPos = FindClearSpawnPosition(spawnPosition, Vector2f((float)(i * 30), (float)(-i * 30)));
@@ -7765,6 +7805,7 @@ namespace Jazz2::Multiplayer
 						}
 					}
 
+					// TRANSLATORS: Message in the console in multiplayer when a player is killed by another player, first {} is victim name, second {} is attacker name, keep \f[...] formatting as it is
 					_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] was roasted by \f[c:#d0705d]{}\f[/c]",
 						peerDesc->PlayerName, attackerPeerDesc->PlayerName));
 
@@ -7791,6 +7832,7 @@ namespace Jazz2::Multiplayer
 						return (peerDesc && peerDesc->IsAuthenticated);
 					}, NetworkChannel::Main, (std::uint8_t)ServerPacketType::PeerSetProperty, packet5);
 				} else {
+					// TRANSLATORS: Message in the console in multiplayer when a player is killed by an enemy or a hazard (not by another player), {} is player name, keep \f[...] formatting as it is
 					_console->WriteLine(UI::MessageLevel::Info, _f("\f[c:#d0705d]{}\f[/c] was roasted by environment",
 						peerDesc->PlayerName));
 
@@ -9059,6 +9101,7 @@ namespace Jazz2::Multiplayer
 		}
 
 		if (anyChanged) {
+			// TRANSLATORS: Message shown to all players in multiplayer when players were moved between teams to even them out, keep the leading line breaks
 			ShowAlertToAllPlayers(_("\n\nTeams have been rebalanced"));
 		}
 	}
@@ -9256,7 +9299,7 @@ namespace Jazz2::Multiplayer
 				}
 			}
 			return true;
-		});
+		}, true);	// An off-grid base comes with the tile its position is in
 
 		for (std::uint8_t team = 0; team < teamCount; team++) {
 			// Fall back to the team's multiplayer spawn point if the level has no authored base for this team
@@ -9294,7 +9337,7 @@ namespace Jazz2::Multiplayer
 
 			_suppressRemoting = false;
 
-			_ctfFlags.push_back(std::move(flag));
+			_ctfFlags.push_back(Death::move(flag));
 		}
 
 		// Push the new flag/base positions and state to clients right away so they can place their local visuals
@@ -9364,6 +9407,7 @@ namespace Jazz2::Multiplayer
 					// Enemy flag taken
 					flag.State = CtfFlagState::Carried;
 					flag.CarrierPlayerIndex = mpPlayer->_playerIndex;
+					// TRANSLATORS: Message shown to all players in Capture the Flag, first {} is player name, second {} is the team color name in English (Blue, Red, Green or Yellow), keep the leading line breaks
 					ShowAlertToAllPlayers(_f("\n\n{} took the {} flag!", peerDesc->PlayerName, GetTeamName(flag.Team)));
 					stateChanged = true;
 				} else if (flag.State == CtfFlagState::Dropped) {
@@ -9372,6 +9416,7 @@ namespace Jazz2::Multiplayer
 					if (flag.Actor != nullptr) {
 						flag.Actor->MoveInstantly(flag.BasePos, Actors::MoveType::Absolute | Actors::MoveType::Force);
 					}
+					// TRANSLATORS: Message shown to all players in Capture the Flag when a dropped flag is returned to its base, {} is the team color name in English (Blue, Red, Green or Yellow), keep the leading line breaks
 					ShowAlertToAllPlayers(_f("\n\nThe {} flag was returned", GetTeamName(flag.Team)));
 					stateChanged = true;
 				}
@@ -9420,6 +9465,7 @@ namespace Jazz2::Multiplayer
 					flag.Actor->MoveInstantly(flag.BasePos, Actors::MoveType::Absolute | Actors::MoveType::Force);
 				}
 
+				// TRANSLATORS: Message shown to all players in Capture the Flag, both {} are team color names in English (Blue, Red, Green or Yellow), keep the leading line breaks
 				ShowAlertToAllPlayers(_f("\n\n{} team captured the {} flag!", GetTeamName(carrierTeam), GetTeamName(flag.Team)));
 
 				if (auto* webhook = _networkManager->GetWebhook()) {
@@ -9531,6 +9577,7 @@ namespace Jazz2::Multiplayer
 				if (flag.Actor != nullptr) {
 					flag.Actor->MoveInstantly(player->_pos, Actors::MoveType::Absolute | Actors::MoveType::Force);
 				}
+				// TRANSLATORS: Message shown to all players in Capture the Flag when the flag carrier dies, {} is the team color name in English (Blue, Red, Green or Yellow), keep the leading line breaks
 				ShowAlertToAllPlayers(_f("\n\nThe {} flag was dropped", GetTeamName(flag.Team)));
 				SyncTeamScores();
 			}
@@ -9576,7 +9623,7 @@ namespace Jazz2::Multiplayer
 			score.Extra = getExtra(peerDesc);
 			score.PingMs = (peerDesc->RemotePeer ? (std::int32_t)_networkManager->GetRoundTripTimeMs(peerDesc->RemotePeer) : -1);
 			score.IsLocal = !peerDesc->RemotePeer;
-			_scoreboard.push_back(std::move(score));
+			_scoreboard.push_back(Death::move(score));
 		}
 
 		// Clients keep their own copy in sync from this packet; a local splitscreen session has none, so it stops
@@ -9814,7 +9861,8 @@ namespace Jazz2::Multiplayer
 		bool isRace = (serverConfig.GameMode == MpGameMode::Race || serverConfig.GameMode == MpGameMode::TeamRace);
 
 		_eventMap->ForEachEvent([this, isRace](Events::EventMap::EventTile& e, std::int32_t x, std::int32_t y) {
-			if (e.Event == EventType::WarpOrigin) {
+			// A coin warp counts a lap the same way, see BonusWarp::Activate()
+			if (e.Event == EventType::WarpOrigin || e.Event == EventType::WarpCoinBonus) {
 				if (e.EventParams[2] != 0) {
 					_raceCheckpoints.emplace_back(Vector2i(x, y));
 					if (isRace) {
@@ -9828,7 +9876,7 @@ namespace Jazz2::Multiplayer
 				_raceCheckpoints.emplace_back(Vector2i(x, y));
 			}
 			return true;
-		});
+		}, true);	// An off-grid waypoint comes with the tile its position is in
 
 		ConsolidateRaceCheckpoints();
 
@@ -9926,7 +9974,7 @@ namespace Jazz2::Multiplayer
 			i = j;
 		}
 
-		_orderedRaceCheckpoints = std::move(merged);
+		_orderedRaceCheckpoints = Death::move(merged);
 		_raceCheckpointsOrdered = true;
 
 		// Minimap extent covers all waypoints and start markers
@@ -10053,7 +10101,7 @@ namespace Jazz2::Multiplayer
 				(onlyTeam >= 0 && peerDesc->Team != (std::uint8_t)onlyTeam)) {
 				continue;
 			}
-			sorted.push_back(std::move(peerDesc));
+			sorted.push_back(Death::move(peerDesc));
 		}
 
 		nCine::sort(sorted.begin(), sorted.end(), [&getScore, &getTiebreaker](const auto& a, const auto& b) {
@@ -10579,6 +10627,7 @@ namespace Jazz2::Multiplayer
 
 			LOGI("Overtime started - {} seconds", serverConfig.OvertimeSecs);
 			// TODO: Localize on client
+			// TRANSLATORS: Message shown to all players in a multiplayer race when the first player finishes, first {} is player name, second {} is number of seconds left for the others, keep the line breaks
 			ShowAlertToAllPlayers(_f("\n\n{} finished the race!\n{} seconds remaining", peerDesc->PlayerName, serverConfig.OvertimeSecs));
 
 			// Clients count the remaining time down on their own from here, so the players still racing can see it
@@ -10593,6 +10642,7 @@ namespace Jazz2::Multiplayer
 				}, NetworkChannel::Main, (std::uint8_t)ServerPacketType::LevelSetProperty, packet);
 			}
 		} else {
+			// TRANSLATORS: Message shown to all players in a multiplayer race, first {} is player name, second {} is the finishing position as a number followed by the dot (e.g. "2." for second), keep the leading line breaks
 			ShowAlertToAllPlayers(_f("\n\n{} finished {}.", peerDesc->PlayerName, peerDesc->RaceFinishOrder));
 		}
 
@@ -10787,7 +10837,7 @@ namespace Jazz2::Multiplayer
 					: 0.0f);
 				result.IsLocal = !peerDesc->RemotePeer;
 				result.Team = peerDesc->Team;
-				_roundResults.push_back(std::move(result));
+				_roundResults.push_back(Death::move(result));
 			}
 		}
 	}
@@ -10857,6 +10907,7 @@ namespace Jazz2::Multiplayer
 
 		if (winner != nullptr) {
 			auto peerDesc = winner->GetPeerDescriptor();
+			// TRANSLATORS: Message shown to all players in multiplayer at the end of a round, {} is player name, keep the leading line breaks
 			ShowAlertToAllPlayers(_f("\n\nWinner is {}", peerDesc->PlayerName));
 			LOGW("Winner is player {} \"{}\" [{}]", winner->_playerIndex, peerDesc->PlayerName, peerDesc->RemotePeer);
 		}
@@ -10921,6 +10972,7 @@ namespace Jazz2::Multiplayer
 			}
 		}
 
+		// TRANSLATORS: Message shown to all players in multiplayer at the end of a round in team game modes, {} is the team color name in English (Blue, Red, Green or Yellow), keep the leading line breaks
 		ShowAlertToAllPlayers(_f("\n\n{} team wins!", GetTeamName(team)));
 		LOGW("Team {} wins", team);
 
@@ -10977,6 +11029,7 @@ namespace Jazz2::Multiplayer
 			}
 
 			if (tied || bestScore == 0) {
+				// TRANSLATORS: Message shown to all players in multiplayer when the time runs out in team game modes and no team leads, keep the leading line breaks
 				ShowAlertToAllPlayers(_("\n\nThe round ended in a draw"));
 				EndGame(static_cast<MpPlayer*>(nullptr));
 			} else {
@@ -11054,19 +11107,15 @@ namespace Jazz2::Multiplayer
 
 		_autoWeightTreasure = (serverConfig.TotalTreasureCollected == 0);
 
-		if (_levelName == playlistEntry.LevelName) {
+		String levelName = ContentResolver::Get().ResolveLevelName(playlistEntry.LevelName);
+		if (_levelName == levelName) {
 			// Level is the same, just change game mode
 			SetGameMode(playlistEntry.GameMode);
 		} else {
 			// Level is different, new level handler needs to be created
 			LevelInitialization levelInit;
 			PrepareNextLevelInitialization(levelInit);
-			auto level = playlistEntry.LevelName.partition('/');
-			if (playlistEntry.LevelName.contains('/')) {
-				levelInit.LevelName = playlistEntry.LevelName;
-			} else {
-				levelInit.LevelName = "unknown/"_s + playlistEntry.LevelName;
-			}
+			levelInit.LevelName = Death::move(levelName);
 			if (!ContentResolver::Get().LevelExists(levelInit.LevelName)) {
 				return false;
 			}
@@ -11074,7 +11123,7 @@ namespace Jazz2::Multiplayer
 			serverConfig.GameMode = playlistEntry.GameMode;
 			levelInit.IsReforged = serverConfig.ReforgedGameplay;
 			levelInit.LastExitType = ExitType::Normal;
-			HandleLevelChange(std::move(levelInit));
+			HandleLevelChange(Death::move(levelInit));
 		}
 
 		return true;
