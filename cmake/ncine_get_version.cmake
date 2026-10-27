@@ -44,7 +44,7 @@ if(NCINE_VERSION_FROM_GIT)
 		#)
 
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 HEAD
+			COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*.[0-9]*" --match "[0-9]*.[0-9]*" --abbrev=0 HEAD
 			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 			RESULT_VARIABLE GIT_NO_LAST_TAG
 			OUTPUT_VARIABLE GIT_LAST_TAG_NAME
@@ -53,7 +53,7 @@ if(NCINE_VERSION_FROM_GIT)
 		)
 
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match HEAD
+			COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*.[0-9]*" --match "[0-9]*.[0-9]*" --exact-match HEAD
 			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 			RESULT_VARIABLE GIT_NO_TAG
 			OUTPUT_VARIABLE GIT_TAG_NAME
@@ -61,6 +61,16 @@ if(NCINE_VERSION_FROM_GIT)
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 		)
 	
+		# Publication tags (for example build-1) are not application versions. Git's match
+		# patterns are globs, so validate the numeric components before parsing them too.
+		set(_versionTagPattern "^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?$")
+		if(NOT GIT_TAG_NAME MATCHES "${_versionTagPattern}")
+			set(GIT_NO_TAG TRUE)
+		endif()
+		if(NOT GIT_LAST_TAG_NAME MATCHES "${_versionTagPattern}")
+			set(GIT_NO_LAST_TAG TRUE)
+		endif()
+
 		if(GIT_FAIL)
 			message(STATUS "GIT failed with error ${GIT_FAIL}, cannot get current application version")
 			set(GIT_NO_VERSION TRUE)
