@@ -11,6 +11,7 @@
 #include "Tiles/TileSet.h"
 #include "Compatibility/AssetConverter.h"
 #include "Compatibility/JJ2Anims.h"
+#include "Compatibility/LegacyLevelNames.h"
 
 #include "../nCine/Application.h"
 #include "../nCine/AppConfiguration.h"
@@ -474,6 +475,15 @@ namespace Jazz2
 			StringView dataPath = AndroidAssetStream::GetExternalDataPath();
 			_sourcePath = fs::CombinePath(dataPath, "Source/"_s);
 			_cachePath = fs::CombinePath(dataPath, "Cache/"_s);
+		}
+		// Only the original files move. Keep the cache, settings and saves at their existing location.
+		String selectedSource = Backends::AndroidJniWrap_Activity::getSourceDirectory();
+		if (!selectedSource.empty()) {
+			_sourcePath = Death::move(selectedSource);
+			String selectedCache = Backends::AndroidJniWrap_Activity::getSourceCacheDirectory();
+			if (!selectedCache.empty()) {
+				_cachePath = Death::move(selectedCache);
+			}
 		}
 #elif defined(DEATH_TARGET_IOS)
 		// The application bundle is flat (no "Contents/Resources" as on macOS), so the content the build copied into
@@ -2788,7 +2798,8 @@ namespace Jazz2
 	bool ContentResolver::LevelExists(StringView levelName)
 	{
 		// Try user "Content" directory first, then "Content" directory and "Cache" directory
-		auto pathNormalized = fs::ToNativeSeparators(levelName);
+		String resolvedName = ResolveLevelName(levelName);
+		auto pathNormalized = fs::ToNativeSeparators(resolvedName);
 		return !FindContentFile(fs::CombinePath("Episodes"_s, String(pathNormalized + ".j2l"_s))).empty();
 	}
 
@@ -2796,6 +2807,17 @@ namespace Jazz2
 	{
 		auto p = name.partition('/');
 		if (!p[2].empty()) {
+			StringView currentName = Compatibility::ResolveLegacyLevelName(name);
+			// An explicitly supplied file (including custom content) always keeps its original identity.
+			if (currentName != name) {
+				String fileName = String(fs::ToNativeSeparators(name) + ".j2l"_s);
+				if (_pathHandler && fs::IsReadableFile(_pathHandler(fileName))) {
+					return String(name);
+				}
+				if (FindContentFile(fs::CombinePath("Episodes"_s, fileName)).empty()) {
+					return String(currentName);
+				}
+			}
 			return String(name);
 		}
 
@@ -2816,7 +2838,8 @@ namespace Jazz2
 	bool ContentResolver::TryGetNextLevelName(StringView path, String& nextLevel)
 	{
 		// Try user "Content" directory first, then "Content" directory and "Cache" directory, the same way as TryLoadLevel()
-		auto pathNormalized = fs::ToNativeSeparators(path);
+		String resolvedName = ResolveLevelName(path);
+		auto pathNormalized = fs::ToNativeSeparators(resolvedName);
 		String fullPath;
 		if (_pathHandler) {
 			fullPath = _pathHandler(String(pathNormalized + ".j2l"_s));
@@ -2851,7 +2874,8 @@ namespace Jazz2
 	bool ContentResolver::TryLoadLevel(StringView path, const LevelLoadOptions& options, LevelDescriptor& descriptor)
 	{
 		// Try user "Content" directory first, then "Content" directory and "Cache" directory
-		auto pathNormalized = fs::ToNativeSeparators(path);
+		String resolvedName = ResolveLevelName(path);
+		auto pathNormalized = fs::ToNativeSeparators(resolvedName);
 		String fullPath;
 		if (_pathHandler) {
 			fullPath = _pathHandler(String(pathNormalized + ".j2l"_s));

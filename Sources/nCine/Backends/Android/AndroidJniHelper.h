@@ -292,6 +292,9 @@ namespace nCine::Backends
 		static bool isScreenRound();
 		static bool hasExternalStoragePermission();
 		static void requestExternalStoragePermission();
+		static String getSourceDirectory();
+		static String getSourceCacheDirectory();
+		static void chooseSourceDirectory(StringView cacheDirectory);
 		static void setActivityEnabled(StringView activity, bool enable);
 		static bool openUrl(StringView url);
 		static jobject getDecorView();
@@ -308,6 +311,9 @@ namespace nCine::Backends
 		static jmethodID _midIsScreenRound;
 		static jmethodID _midHasExternalStoragePermission;
 		static jmethodID _midRequestExternalStoragePermission;
+		static jmethodID _midGetSourceDirectory;
+		static jmethodID _midGetSourceCacheDirectory;
+		static jmethodID _midChooseSourceDirectory;
 		static jmethodID _midSetActivityEnabled;
 		static jmethodID _midOpenUrl;
 		static jmethodID _midGetWindow;

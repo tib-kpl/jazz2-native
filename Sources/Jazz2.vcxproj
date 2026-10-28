@@ -478,6 +478,7 @@
     <ClInclude Include="Jazz2\AnimationLoopMode.h" />
     <ClInclude Include="Jazz2\Compatibility\AnimSetMapping.h" />
     <ClInclude Include="Jazz2\Compatibility\AssetConverter.h" />
+      <ClInclude Include="Jazz2\Compatibility\LegacyLevelNames.h" />
     <ClInclude Include="Jazz2\Compatibility\ConversionProgress.h" />
     <ClInclude Include="Jazz2\Compatibility\EventConverter.h" />
     <ClInclude Include="Jazz2\Compatibility\J2vRecompressor.h" />

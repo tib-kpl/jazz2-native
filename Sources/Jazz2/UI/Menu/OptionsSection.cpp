@@ -4,8 +4,12 @@
 #include "SoundsOptionsSection.h"
 #include "ControlsOptionsSection.h"
 #include "UserProfileOptionsSection.h"
+#include "../../ContentResolver.h"
 
 #include "../../../nCine/I18n.h"
+#if defined(DEATH_TARGET_ANDROID)
+#	include "../../../nCine/Backends/Android/AndroidJniHelper.h"
+#endif
 
 namespace Jazz2::UI::Menu
 {
@@ -39,6 +43,11 @@ namespace Jazz2::UI::Menu
 		_items.push_back(list->Add<ListItem>(_("Controls"), [root]() { root->SwitchToSection<ControlsOptionsSection>(); }, itemHeight));
 		// TRANSLATORS: Menu item in Options section
 		_items.push_back(list->Add<ListItem>(_("User Profile"), [root]() { root->SwitchToSection<UserProfileOptionsSection>(); }, itemHeight));
+#if defined(DEATH_TARGET_ANDROID)
+		_items.push_back(list->Add<ListItem>(_("Choose Game Folder"), []() {
+			Backends::AndroidJniWrap_Activity::chooseSourceDirectory(ContentResolver::Get().GetCachePath());
+		}, itemHeight));
+#endif
 		SetContent(Death::move(list));
 	}
 

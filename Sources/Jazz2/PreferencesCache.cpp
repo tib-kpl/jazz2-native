@@ -1217,7 +1217,7 @@ namespace
 #	if defined(DEATH_TARGET_ANDROID)
 			// Save config file to external path if possible
 			auto& resolver = ContentResolver::Get();
-			auto externalConfigPath = fs::CombinePath(fs::GetDirectoryName(resolver.GetSourcePath()), "Jazz2.config"_s);
+			auto externalConfigPath = fs::CombinePath(fs::GetDirectoryName(resolver.GetCachePath()), "Jazz2.config"_s);
 			if (!fs::IsReadableFile(_configPath) || fs::IsReadableFile(externalConfigPath)) {
 				_configPath = externalConfigPath;
 			}
@@ -1679,6 +1679,10 @@ namespace
 			// Create "Source" directory on the first launch, so there is somewhere to put the original files.
 			// A platform that cannot convert them has no use for it, prepared content is all it ever loads.
 			auto& resolver = ContentResolver::Get();
+			// A selected source is read in place, even when the card is temporarily unavailable.
+#	if defined(DEATH_TARGET_ANDROID)
+			if (Backends::AndroidJniWrap_Activity::getSourceDirectory().empty())
+#	endif
 			fs::CreateDirectories(resolver.GetSourcePath());
 #endif
 

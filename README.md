@@ -87,6 +87,7 @@ Alternatively, you can install it using <sub><sub>[![Homebrew](https://img.shiel
   * On **Android 11** or newer, you can *Allow access to external storage* in main menu, then you can use these additional paths:
     * `‹Storage›/Games/Jazz² Resurrection/Source/`
     * `‹Storage›/Download/Jazz² Resurrection/Source/`
+* Alternatively, keep the original game files in any folder on internal storage or an SD card (for example `ROMS/PC/Jazz2/`). Open **Options > Choose Game Folder**, select the folder containing `Anims.j2a` (or `AnimsSw.j2a`) and the `.j2l` levels, then quit and restart the game. On Android 11 or newer, allow access to all files first. Files are read directly from the selected folder; settings, saves and generated cache stay in their existing location. **Automatic** restores the default folder search. Keep the SD card mounted while playing.
 * Run the newly installed application
 
 `‹Storage›` *usually denotes internal storage on your device.* `Content` *directory is included directly in APK file, no action is needed. The game requires **Android 5.0** (or newer) and GPU with **OpenGL ES 3.0** support. Cache is recreated during the intro cinematics on the first startup. Also, the sound effects in the intro cinematics require the cache, so they will be missing the first time the game is started up.*

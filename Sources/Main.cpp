@@ -1965,8 +1965,8 @@ void GameEventHandler::OnBeginInitialize()
 		_flags |= Flags::HasExternalStoragePermission;
 	}
 
-	// Try to load gamepad mappings from parent directory of `Source` on Android
-	String mappingsPath = fs::CombinePath(fs::GetDirectoryName(resolver.GetSourcePath()), "gamecontrollerdb.txt"_s);
+	// Keep user mappings with the settings, even when the original game files are on another volume.
+	String mappingsPath = fs::CombinePath(fs::GetDirectoryName(resolver.GetCachePath()), "gamecontrollerdb.txt"_s);
 	if (fs::IsReadableFile(mappingsPath)) {
 		theApplication().GetInputManager().addJoyMappingsFromFile(mappingsPath);
 	}
@@ -2204,6 +2204,26 @@ void GameEventHandler::RefreshCache()
 
 		// Cache is up-to-date
 		std::uint64_t lastVersion = s->ReadValueAsLE<std::uint64_t>();
+		bool sourceLocationRecorded = true;
+#if defined(DEATH_TARGET_ANDROID)
+		// Old indexes end here. A user-selected source must never reuse a different game's cache,
+		// even when both animation files happen to have the same modification time.
+		sourceLocationRecorded = (s->GetPosition() < s->GetSize());
+		if (sourceLocationRecorded) {
+			std::uint32_t length = s->ReadVariableUint32();
+			if (length > 32768 || length > s->GetSize() - s->GetPosition()) {
+				goto RecreateCache;
+			}
+			String cachedSource(NoInit, length);
+			s->Read(cachedSource.data(), length);
+			if (cachedSource != resolver.GetSourcePath() || !fs::IsReadableFile(animsPath)) {
+				LOGI("Source directory changed or is unavailable, recreating cache");
+				goto RecreateCache;
+			}
+		} else if (!Backends::AndroidJniWrap_Activity::getSourceDirectory().empty()) {
+			goto RecreateCache;
+		}
+#endif
 
 		// Close the file, so it can be writable for possible update
 		s = nullptr;
@@ -2211,7 +2231,7 @@ void GameEventHandler::RefreshCache()
 		// Only the levels that aren't converted yet are left to do here, so they get the whole range
 		RefreshCacheLevels(false, progress);
 
-		if (currentVersion != lastVersion) {
+		if (currentVersion != lastVersion || !sourceLocationRecorded) {
 			if ((lastVersion & 0xFFFFFFFFULL) == 0x0FFFFFFFULL) {
 				LOGI("Cache is already up-to-date, but created in experimental build v{}.{}.0", (lastVersion >> 48) & 0xFFFFULL, (lastVersion >> 32) & 0xFFFFULL);
 			} else {
@@ -2251,6 +2271,11 @@ RecreateCache:
 	}
 
 	fs::CreateDirectories(resolver.GetCachePath());
+#if defined(DEATH_TARGET_ANDROID)
+	// Converted levels belonging only to the previous source must not remain playable after rebuilding.
+	fs::RemoveDirectoryRecursive(fs::CombinePath(resolver.GetCachePath(), "Episodes"_s));
+	fs::RemoveDirectoryRecursive(fs::CombinePath(resolver.GetCachePath(), "Tilesets"_s));
+#endif
 
 	// Delete cache from previous versions
 	String animationsPath = fs::CombinePath(resolver.GetCachePath(), "Animations"_s);
@@ -2457,6 +2482,11 @@ void GameEventHandler::WriteCacheDescriptor(StringView path, std::uint64_t curre
 	so->WriteValueAsLE<std::int64_t>(animsModified);
 	so->WriteValueAsLE<std::uint16_t>(std::uint16_t(EventType::Count));
 	so->WriteValueAsLE<std::uint64_t>(currentVersion);
+#if defined(DEATH_TARGET_ANDROID)
+	StringView sourcePath = ContentResolver::Get().GetSourcePath();
+	so->WriteVariableUint32(static_cast<std::uint32_t>(sourcePath.size()));
+	so->Write(sourcePath.data(), sourcePath.size());
+#endif
 }
 
 void GameEventHandler::SaveEpisodeEnd(const LevelInitialization& levelInit)

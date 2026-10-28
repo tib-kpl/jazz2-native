@@ -506,7 +506,7 @@ namespace Jazz2
 		 *
 		 * A name without an episode (`battle1`) is a level of no episode, a name ending with a slash (`prince/`) is
 		 * the first level of that episode. If there's no such episode, the name is returned as it is, so it can be
-		 * reported.
+		 * reported. Historical names of original levels are upgraded when no file exists at the old name.
 		 */
 		String ResolveLevelName(StringView name);
 		/**

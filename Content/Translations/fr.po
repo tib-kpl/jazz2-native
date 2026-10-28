@@ -3190,3 +3190,7 @@ msgstr ""
 
 #~ msgid "Short"
 #~ msgstr "Court"
+
+#: Sources/Jazz2/UI/Menu/OptionsSection.cpp
+msgid "Choose Game Folder"
+msgstr "Choisir le dossier du jeu"

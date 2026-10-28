@@ -390,6 +390,9 @@ namespace Jazz2
 
 		if (version >= 6) {
 			ReadSnapshotStrings(src, _completedSpecialLevels);
+			for (String& level : _completedSpecialLevels) {
+				level = resolver.ResolveLevelName(level);
+			}
 		}
 
 		return true;
@@ -640,6 +643,7 @@ namespace Jazz2
 	bool LevelHandler::LoadLevel(LevelDescriptor& descriptor)
 	{
 		auto& resolver = ContentResolver::Get();
+		_levelName = resolver.ResolveLevelName(_levelName);
 		LevelLoadOptions options = GetLevelLoadOptions();
 		if (resolver.TryLoadLevel(_levelName, options, descriptor)) {
 			return true;
@@ -2523,6 +2527,9 @@ namespace Jazz2
 
 		if (version >= 2) {
 			ReadSnapshotStrings(src, _completedSpecialLevels);
+			for (String& level : _completedSpecialLevels) {
+				level = ContentResolver::Get().ResolveLevelName(level);
+			}
 		}
 
 		if (!_players.empty() && (levelBoundsLeft != _levelBounds.X || levelBoundsWidth != _levelBounds.W)) {

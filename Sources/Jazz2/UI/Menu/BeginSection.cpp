@@ -300,7 +300,11 @@ namespace Jazz2::UI::Menu
 			_items[i].Y = center.Y;
 
 #if !defined(DEATH_TARGET_EMSCRIPTEN)
-			if (_items[i].Type <= Item::Options && !_isPlayable) {
+			if (_items[i].Type <= Item::Options && !_isPlayable
+#if defined(DEATH_TARGET_ANDROID)
+				&& _items[i].Type != Item::Options
+#endif
+			) {
 				if (i != 0 && (i != 1 || !_skipSecondItem)) {
 					if (_selectedIndex == i) {
 						_root->DrawElement(MenuGlow, 0, center.X, center.Y, IMenuContainer::MainLayer, Alignment::Center, Colorf(1.0f, 1.0f, 1.0f, 0.2f),
@@ -467,7 +471,11 @@ namespace Jazz2::UI::Menu
 				}
 				break;
 			case Item::Options:
+#if !defined(DEATH_TARGET_ANDROID)
 				if (_isPlayable) {
+#else
+				{
+#endif
 					_root->PlaySfx("MenuSelect"_s, 0.6f);
 					_root->SwitchToSection<OptionsSection>();
 				}

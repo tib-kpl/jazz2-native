@@ -1,6 +1,7 @@
 package @NCINE_REVERSE_DNS@;
 
 import android.app.NativeActivity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -14,6 +15,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.provider.DocumentsContract;
 import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.View;
@@ -27,6 +29,8 @@ import android.widget.FrameLayout;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import java.util.List;
+import java.io.File;
+import java.io.IOException;
 import @NCINE_REVERSE_DNS@.Keep;
 
 public abstract class MainActivityBase extends NativeActivity implements DisplayManager.DisplayListener {
@@ -37,6 +41,7 @@ public abstract class MainActivityBase extends NativeActivity implements Display
 	private static final int SoftInputRetryDelayMs = 100;
 	// The keyboard needs some time to animate in, don't trust insets reporting it as hidden until then
 	private static final int SoftInputGracePeriodMs = 1500;
+	private static final int SourceDirectoryRequest = 2102;
 
 	private OnBackInvokedCallback backCallback;
 
@@ -169,6 +174,112 @@ public abstract class MainActivityBase extends NativeActivity implements Display
 				startActivity(intent);
 			} catch (Exception ignored2) {
 			}
+		}
+	}
+
+	/** The native engine reads local files directly; the tree picker selects their location, without importing them. */
+	@Keep
+	public String getSourceDirectory() {
+		return getSharedPreferences("game_storage", MODE_PRIVATE).getString("source_directory", "");
+	}
+
+	@Keep
+	public String getSourceCacheDirectory() {
+		return getSharedPreferences("game_storage", MODE_PRIVATE).getString("cache_directory", "");
+	}
+
+	private String storageText(String english, String french) {
+		return "fr".equals(java.util.Locale.getDefault().getLanguage()) ? french : english;
+	}
+
+	private void storageMessage(String message) {
+		new AlertDialog.Builder(this)
+			.setTitle(storageText("Game folder", "Dossier du jeu"))
+			.setMessage(message).setPositiveButton(android.R.string.ok, null).show();
+	}
+
+	@Keep
+	public void chooseSourceDirectory(String cacheDirectory) {
+		runOnUiThread(() -> new AlertDialog.Builder(this)
+			.setTitle(storageText("Game folder", "Dossier du jeu"))
+			.setMessage(storageText(
+				"Current selection: ", "Sélection actuelle : ") +
+				(getSourceDirectory().isEmpty() ? storageText("Automatic", "Automatique") : getSourceDirectory()) +
+				storageText("\nSelect the folder containing Anims.j2a (or AnimsSw.j2a) and the original levels. Files stay in that folder. Changes apply after quitting and restarting the game.",
+				"\nChoisissez le dossier contenant Anims.j2a (ou AnimsSw.j2a) et les niveaux originaux. Les fichiers restent dans ce dossier. Le changement s'applique après avoir quitté et relancé le jeu."))
+			.setPositiveButton(storageText("Choose…", "Choisir…"), (dialog, which) -> {
+				if (android.os.Build.VERSION.SDK_INT >= 30 && !hasExternalStoragePermission()) {
+					storageMessage(storageText("Allow access to all files, then choose the game folder again.",
+						"Autorisez l'accès à tous les fichiers, puis choisissez à nouveau le dossier du jeu."));
+					requestExternalStoragePermission();
+					return;
+				}
+				try {
+					getSharedPreferences("game_storage", MODE_PRIVATE).edit().putString("pending_cache_directory", cacheDirectory).commit();
+					Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+					intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+					startActivityForResult(intent, SourceDirectoryRequest);
+				} catch (Exception e) {
+					storageMessage(storageText("No folder picker is available on this device.",
+						"Aucun sélecteur de dossier n'est disponible sur cet appareil."));
+				}
+			})
+			.setNeutralButton(storageText("Automatic", "Automatique"), (dialog, which) -> {
+				if (getSharedPreferences("game_storage", MODE_PRIVATE).edit().remove("source_directory").remove("cache_directory").remove("pending_cache_directory").commit()) {
+					storageMessage(storageText("Automatic location restored. Quit and restart the game.",
+						"Emplacement automatique rétabli. Quittez et relancez le jeu."));
+				}
+			})
+			.setNegativeButton(android.R.string.cancel, null).show());
+	}
+
+	@Override
+	protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+		super.onActivityResult(requestCode, resultCode, data);
+		if (requestCode != SourceDirectoryRequest || resultCode != RESULT_OK || data == null || data.getData() == null) {
+			return;
+		}
+		try {
+			Uri uri = data.getData();
+			// Cloud/document providers cannot be opened by the engine's filesystem API.
+			if (!"com.android.externalstorage.documents".equals(uri.getAuthority())) {
+				throw new IOException("Not local storage");
+			}
+			String[] document = DocumentsContract.getTreeDocumentId(uri).split(":", 2);
+			if (document.length != 2 || (!"primary".equals(document[0]) && !document[0].matches("[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"))) {
+				throw new IOException("Unknown storage volume");
+			}
+			File volume = ("primary".equals(document[0]) ? Environment.getExternalStorageDirectory() : new File("/storage", document[0])).getCanonicalFile();
+			File folder = new File(volume, document[1]).getCanonicalFile();
+			if (!folder.equals(volume) && !folder.getPath().startsWith(volume.getPath() + File.separator)) {
+				throw new IOException("Outside selected volume");
+			}
+			File[] files = folder.listFiles();
+			boolean animations = false;
+			boolean levels = false;
+			if (files != null) {
+				for (File file : files) {
+					if (!file.isFile() || !file.canRead()) continue;
+					String name = file.getName().toLowerCase(java.util.Locale.ROOT);
+					animations |= name.equals("anims.j2a") || name.equals("animssw.j2a");
+					levels |= name.endsWith(".j2l");
+				}
+			}
+			if (!animations || !levels) {
+				storageMessage(storageText("This folder must contain readable Anims.j2a (or AnimsSw.j2a) and .j2l level files. The previous selection is unchanged.",
+					"Ce dossier doit contenir Anims.j2a (ou AnimsSw.j2a) et les niveaux .j2l accessibles en lecture. La sélection précédente est conservée."));
+				return;
+			}
+			android.content.SharedPreferences preferences = getSharedPreferences("game_storage", MODE_PRIVATE);
+			if (!preferences.edit().putString("source_directory", folder.getPath())
+				.putString("cache_directory", preferences.getString("pending_cache_directory", ""))
+				.remove("pending_cache_directory").commit()) {
+				throw new IOException("Cannot save selection");
+			}
+			storageMessage(storageText("Folder saved. Quit and restart the game to use it.\n", "Dossier enregistré. Quittez et relancez le jeu pour l'utiliser.\n") + folder.getPath());
+		} catch (Exception e) {
+			storageMessage(storageText("Choose a readable folder on internal storage or an SD card. The previous selection is unchanged.",
+				"Choisissez un dossier accessible du stockage interne ou d'une carte SD. La sélection précédente est conservée."));
 		}
 	}
 

@@ -66,6 +66,9 @@ namespace nCine::Backends
 	jmethodID AndroidJniWrap_Activity::_midIsScreenRound = nullptr;
 	jmethodID AndroidJniWrap_Activity::_midHasExternalStoragePermission = nullptr;
 	jmethodID AndroidJniWrap_Activity::_midRequestExternalStoragePermission = nullptr;
+	jmethodID AndroidJniWrap_Activity::_midGetSourceDirectory = nullptr;
+	jmethodID AndroidJniWrap_Activity::_midGetSourceCacheDirectory = nullptr;
+	jmethodID AndroidJniWrap_Activity::_midChooseSourceDirectory = nullptr;
 	jmethodID AndroidJniWrap_Activity::_midSetActivityEnabled = nullptr;
 	jmethodID AndroidJniWrap_Activity::_midOpenUrl = nullptr;
 	jmethodID AndroidJniWrap_Activity::_midGetWindow = nullptr;
@@ -781,6 +784,9 @@ namespace nCine::Backends
 		_midIsScreenRound = AndroidJniClass::getMethodID(nativeActivityClass, "isScreenRound", "()Z");
 		_midHasExternalStoragePermission = AndroidJniClass::getMethodID(nativeActivityClass, "hasExternalStoragePermission", "()Z");
 		_midRequestExternalStoragePermission = AndroidJniClass::getMethodID(nativeActivityClass, "requestExternalStoragePermission", "()V");
+		_midGetSourceDirectory = AndroidJniClass::getMethodID(nativeActivityClass, "getSourceDirectory", "()Ljava/lang/String;");
+		_midGetSourceCacheDirectory = AndroidJniClass::getMethodID(nativeActivityClass, "getSourceCacheDirectory", "()Ljava/lang/String;");
+		_midChooseSourceDirectory = AndroidJniClass::getMethodID(nativeActivityClass, "chooseSourceDirectory", "(Ljava/lang/String;)V");
 		_midSetActivityEnabled = AndroidJniClass::getMethodID(nativeActivityClass, "setActivityEnabled", "(Ljava/lang/String;Z)V");
 		_midSetActivityEnabled = AndroidJniClass::getMethodID(nativeActivityClass, "setActivityEnabled", "(Ljava/lang/String;Z)V");
 		_midOpenUrl = AndroidJniClass::getMethodID(nativeActivityClass, "openUrl", "(Ljava/lang/String;)Z");
@@ -910,6 +916,43 @@ namespace nCine::Backends
 		} else {
 			return false;
 		}
+	}
+
+	String AndroidJniWrap_Activity::getSourceDirectory()
+	{
+		jstring value = static_cast<jstring>(AndroidJniHelper::jniEnv->CallObjectMethod(_activityObject, _midGetSourceDirectory));
+		if (value == nullptr) {
+			return {};
+		}
+		const char* chars = AndroidJniHelper::jniEnv->GetStringUTFChars(value, nullptr);
+		String result(chars);
+		AndroidJniHelper::jniEnv->ReleaseStringUTFChars(value, chars);
+		AndroidJniHelper::jniEnv->DeleteLocalRef(value);
+		return result;
+	}
+
+	String AndroidJniWrap_Activity::getSourceCacheDirectory()
+	{
+		jstring value = static_cast<jstring>(AndroidJniHelper::jniEnv->CallObjectMethod(_activityObject, _midGetSourceCacheDirectory));
+		if (value == nullptr) {
+			return {};
+		}
+		const char* chars = AndroidJniHelper::jniEnv->GetStringUTFChars(value, nullptr);
+		String result(chars);
+		AndroidJniHelper::jniEnv->ReleaseStringUTFChars(value, chars);
+		AndroidJniHelper::jniEnv->DeleteLocalRef(value);
+		return result;
+	}
+
+	void AndroidJniWrap_Activity::chooseSourceDirectory(StringView cacheDirectory)
+	{
+		auto directory = String::nullTerminatedView(cacheDirectory);
+		jstring value = AndroidJniHelper::jniEnv->NewStringUTF(directory.data());
+		if (value == nullptr) {
+			return;
+		}
+		AndroidJniHelper::jniEnv->CallVoidMethod(_activityObject, _midChooseSourceDirectory, value);
+		AndroidJniHelper::jniEnv->DeleteLocalRef(value);
 	}
 
 	void AndroidJniWrap_Activity::requestExternalStoragePermission()
