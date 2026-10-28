@@ -1,4 +1,4 @@
-#if defined(WITH_ANGELSCRIPT)
+﻿#if defined(WITH_ANGELSCRIPT)
 
 #include "Player.h"
 #include "AnimationTables.h"
@@ -8,6 +8,15 @@
 #include "../../Actors/ActorBase.h"
 #include "../../Actors/Player.h"
 #include "../../Actors/Collectibles/CollectibleBase.h"
+#include "../../Actors/Environment/Spring.h"
+#include "../../Actors/Weapons/BlasterShot.h"
+#include "../../Actors/Weapons/BouncerShot.h"
+#include "../../Actors/Weapons/ElectroShot.h"
+#include "../../Actors/Weapons/FreezerShot.h"
+#include "../../Actors/Weapons/PepperShot.h"
+#include "../../Actors/Weapons/RFShot.h"
+#include "../../Actors/Weapons/SeekerShot.h"
+#include "../../Actors/Weapons/ToasterShot.h"
 #include "../../Compatibility/JJ2Strings.h"
 #include "../../Rendering/PlayerViewport.h"
 
@@ -195,7 +204,7 @@ namespace Jazz2::Scripting
 			_player->_checkpointPos.Y = value;
 			return _player->_checkpointPos.Y;
 		}
-		// Speeds are in pixels per tick of JJ2+, 70 in a second, the player moves by frames, 60 in a second (ThreedRealms' burger booth
+		// Speeds are in pixels per tick of JJ2+, 70 in a second, the player moves by frames, 60 in a second (a burger booth
 		// lifts the player by 1 a tick, 100 pixels in its 100 ticks)
 		static constexpr float PlayerSpeedToTicks = 60.0f / 70.0f;
 
@@ -330,6 +339,17 @@ namespace Jazz2::Scripting
 			}
 			return (std::int32_t)(_player->_invulnerableTime * 70.0f / FrameTimer::FramesPerSecond);
 		}
+		std::uint32_t jjPLAYER::get_lightType() const {
+			// LIGHT::NONE and LIGHT::PLAYER of JJ2+
+			return (_player != nullptr && _player->_lightHiddenByScript ? 0 : 10);
+		}
+		std::uint32_t jjPLAYER::set_lightType(std::uint32_t value) {
+			// Only whether the player has its light, the light of the game is the light of a player of any type
+			if (_player != nullptr) {
+				_player->_lightHiddenByScript = (value == 0);
+			}
+			return value;
+		}
 		std::int32_t jjPLAYER::set_invincibility(std::int32_t value) {
 			if (_player == nullptr) {
 				return {};
@@ -376,7 +396,7 @@ namespace Jazz2::Scripting
 			if (_player == nullptr) {
 				return {};
 			}
-			noop(); return _player->_inventory.FoodEaten;
+			return _player->_inventory.FoodEaten;
 		}
 		std::int32_t jjPLAYER::set_food(std::int32_t value) {
 			if (_player == nullptr) {
@@ -467,6 +487,85 @@ namespace Jazz2::Scripting
 			return value;
 		}
 
+		std::int8_t jjPLAYER::get_frozen() const {
+			if (_player == nullptr) {
+				return {};
+			}
+			return std::int8_t(std::min(std::ceil(_player->_frozenTimeLeft * 70.0f / FrameTimer::FramesPerSecond), 127.0f));
+		}
+		std::int8_t jjPLAYER::set_frozen(std::int8_t value) {
+			if (_player == nullptr) {
+				return {};
+			}
+			if (value > 0) {
+				_player->Freeze(value * FrameTimer::FramesPerSecond / 70.0f);
+			} else if (_player->_frozenTimeLeft > 0.0f) {
+				_player->Freeze(0.0f);
+			}
+			return value;
+		}
+		std::int32_t jjPLAYER::get_lives() const {
+			return (_player != nullptr ? _player->_lives : 0);
+		}
+		std::int32_t jjPLAYER::set_lives(std::int32_t value) {
+			if (_player != nullptr) {
+				_player->_lives = value;
+			}
+			return value;
+		}
+		std::int8_t jjPLAYER::get_direction() const {
+			if (_player == nullptr) {
+				return {};
+			}
+			return std::int8_t(_player->IsFacingLeft() ? -1 : 1);
+		}
+		std::int8_t jjPLAYER::set_direction(std::int8_t value) {
+			if (_player != nullptr && value != 0) {
+				_player->SetFacingLeft(value < 0);
+			}
+			return value;
+		}
+		std::int32_t jjPLAYER::get_doubleJumpCount() const {
+			return (_player != nullptr && !_player->_canDoubleJump ? 1 : 0);
+		}
+		std::int32_t jjPLAYER::set_doubleJumpCount(std::int32_t value) {
+			if (_player != nullptr) {
+				_player->_canDoubleJump = (value == 0);
+			}
+			return value;
+		}
+		bool jjPLAYER::get_alreadyDoubleJumped() const {
+			return (get_doubleJumpCount() != 0);
+		}
+		bool jjPLAYER::set_alreadyDoubleJumped(bool value) {
+			set_doubleJumpCount(value ? 1 : 0);
+			return value;
+		}
+		std::int32_t jjPLAYER::get_helicopter() const {
+			if (_player == nullptr) {
+				return {};
+			}
+			return std::int32_t(std::ceil(std::max(_player->_copterFramesLeft, 0.0f) * 70.0f / FrameTimer::FramesPerSecond));
+		}
+		std::int32_t jjPLAYER::set_helicopter(std::int32_t value) {
+			if (_player != nullptr) {
+				_player->_copterFramesLeft = std::max(value, 0) * FrameTimer::FramesPerSecond / 70.0f;
+			}
+			return value;
+		}
+		std::int32_t jjPLAYER::get_idle() const {
+			if (_player == nullptr) {
+				return {};
+			}
+			return std::int32_t(_player->_idleTime * 70.0f / FrameTimer::FramesPerSecond);
+		}
+		std::int32_t jjPLAYER::set_idle(std::int32_t value) {
+			if (_player != nullptr) {
+				_player->_idleTime = std::max(value, 0) * FrameTimer::FramesPerSecond / 70.0f;
+			}
+			return value;
+		}
+
 		std::int32_t jjPLAYER::get_rolling() const {
 			if (_player == nullptr) {
 				return {};
@@ -501,13 +600,13 @@ namespace Jazz2::Scripting
 			if (_player == nullptr) {
 				return {};
 			}
-			noop(); return (std::int8_t)_player->_playerIndex;
+			return (std::int8_t)_player->_playerIndex;
 		}
 		std::int32_t jjPLAYER::get_localPlayerID() const {
 			if (_player == nullptr) {
 				return {};
 			}
-			noop(); return _player->_playerIndex;
+			return _player->_playerIndex;
 		}
 
 		bool jjPLAYER::get_running() const {
@@ -545,7 +644,23 @@ namespace Jazz2::Scripting
 			noop();
 		}
 		void jjPLAYER::spring(float xSpeed, float ySpeed, bool keepZeroSpeeds, bool sample) {
-			noop();
+			if (_player == nullptr || (xSpeed == 0.0f && ySpeed == 0.0f)) {
+				return;
+			}
+			// As touching a spring of the speeds of the original, the axis of a zero speed keeps the speed if asked
+			auto* levelHandler = _player->_levelHandler;
+			Vector2f force(
+				xSpeed != 0.0f ? std::copysign(Actors::Environment::Spring::GetStrengthOfLegacySpeed(levelHandler, std::abs(xSpeed), true), xSpeed) : 0.0f,
+				ySpeed != 0.0f ? std::copysign(Actors::Environment::Spring::GetStrengthOfLegacySpeed(levelHandler, std::abs(ySpeed), false), ySpeed) : 0.0f);
+			bool removeSpecialMove = false;
+			_player->OnHitSpring(_player->_pos, force, keepZeroSpeeds && xSpeed == 0.0f, keepZeroSpeeds && ySpeed == 0.0f, removeSpecialMove);
+			if (removeSpecialMove) {
+				_player->_controllable = true;
+				_player->EndDamagingMove();
+			}
+			if (sample) {
+				_levelScriptLoader->PlaySample(_player->_pos, sSPRING_SPRING1, 63, 0, false);
+			}
 		}
 
 		bool jjPLAYER::get_isConnecting() const {
@@ -673,7 +788,7 @@ namespace Jazz2::Scripting
 				return {};
 			}
 			// Toggles tileset collision so the player can pass through level geometry, and gravity, a player in noclip mode keeps
-			// the speed it has (ThreedRealms' burger booth makes the player rise slowly by it)
+			// the speed it has (a burger booth makes the player rise slowly by it)
 			_player->SetState(Actors::ActorState::CollideWithTileset | Actors::ActorState::ApplyGravitation, !value);
 			return value;
 		}
@@ -681,14 +796,14 @@ namespace Jazz2::Scripting
 			if (_player == nullptr) {
 				return {};
 			}
-			// The ambient light of the view of the player, 64 is full light as in JJ2 (see the converter of LIGHT_SET)
-			return (std::uint8_t)std::clamp(_levelScriptLoader->_levelHandler->GetAmbientLight(_player) * 64.0f + 0.5f, 0.0f, 255.0f);
+			// The ambient light of the view of the player, 100 is full light as in JJ2 (see the converter of LIGHT_SET)
+			return (std::uint8_t)std::clamp(_levelScriptLoader->_levelHandler->GetAmbientLight(_player) * 100.0f + 0.5f, 0.0f, 255.0f);
 		}
 		std::uint8_t jjPLAYER::set_lighting(std::uint8_t value) {
 			if (_player == nullptr) {
 				return {};
 			}
-			_levelScriptLoader->_levelHandler->SetAmbientLight(_player, value / 64.0f);
+			_levelScriptLoader->_levelHandler->SetAmbientLight(_player, value / 100.0f);
 			return value;
 		}
 		std::uint8_t jjPLAYER::resetLight() {
@@ -945,7 +1060,7 @@ namespace Jazz2::Scripting
 			if (_player == nullptr) {
 				return {};
 			}
-			// Whether the player was hurt, scripts act on it (ThreedRealms' pumpkin bombs explode then) - one blinking after
+			// Whether the player was hurt, scripts act on it (bombs explode then) - one blinking after
 			// a hit is hurt only when forced
 			if (forceHurt && _player->_invulnerableTime > 0.0f) {
 				_player->_invulnerableTime = 0.0f;
@@ -972,11 +1087,16 @@ namespace Jazz2::Scripting
 			return _timerState;
 		}
 		std::uint32_t jjPLAYER::timerPause() {
-			_timerState = 2; // PAUSED
+			// Only a started timer pauses, a stopped one stays stopped
+			if (_timerState == 1) { // STARTED
+				_timerState = 2; // PAUSED
+			}
 			return _timerState;
 		}
 		std::uint32_t jjPLAYER::timerResume() {
-			_timerState = 1; // STARTED
+			if (_timerState == 2) { // PAUSED
+				_timerState = 1; // STARTED
+			}
 			return _timerState;
 		}
 		std::uint32_t jjPLAYER::timerStop() {
@@ -1177,7 +1297,7 @@ namespace Jazz2::Scripting
 					target->_synced.Energy = target->energy;
 					if ((victim->GetHealth() <= 0 || victim->GetState(Actors::ActorState::IsDestroyed)) && runtime_cast<Actors::Collectibles::CollectibleBase>(victim.get()) != nullptr) {
 						// A collected pickup is a sparkle at once, as measured in JJ2+ - scripts tell the ones that are gone by their
-						// behavior (ThreedRealms' series of gems keep drawing theirs otherwise)
+						// behavior (series of gems keep drawing theirs otherwise)
 						constexpr std::uint32_t BehaviorExplosion2 = aCOUNT + 21;
 						constexpr std::uint32_t HandlingExplosion = 4;
 						target->behavior = BehaviorExplosion2;
@@ -1289,96 +1409,82 @@ namespace Jazz2::Scripting
 				return;
 			}
 
-			// In ticks, 70 in a second
-			constexpr float FramesToTicks = 70.0f / 60.0f;
-
-			// A writable property a script changed keeps its value until it's handed over (see SyncPropertiesFromBackingStore())
-			auto refresh = [this](auto& property, auto& synced, auto value) {
-				if (!_syncedOnce || property == synced) {
-					property = value;
-				}
-				synced = value;
-			};
-			refresh(lives, _synced.Lives, _player->_lives);
-			refresh(direction, _synced.Direction, std::int8_t(_player->IsFacingLeft() ? -1 : 1));
-			refresh(frozen, _synced.Frozen, std::int8_t(std::min(std::ceil(_player->_frozenTimeLeft * FramesToTicks), 127.0f)));
-			refresh(specialJump, _synced.SpecialJump, std::int32_t(_player->_canDoubleJump ? 0 : 1));
-			refresh(helicopter, _synced.Helicopter, std::int32_t(std::ceil(std::max(_player->_copterFramesLeft, 0.0f) * FramesToTicks)));
-			refresh(idle, _synced.Idle, std::int32_t(_player->_idleTime * FramesToTicks));
-			_syncedOnce = true;
-
 			// What only the game decides, as JJ2+ has it - a buttstomp counts down from below 41, 50 is none
 			buttstomp = (_player->_currentSpecialMove == Actors::Player::SpecialMoveType::Buttstomp ? 1 : 50);
 			specialMove = std::int32_t(_player->_currentSpecialMove);
 			// A boss of the game is the one, a boss of a script is told by the script (`boss`)
-			// - and what a script set stays as it set it (HH17's dragon is a boss of the script, which ends it so when it's slain)
+			// - and what a script set stays as it set it (a boss of a script ends it so when it's slain)
 			std::int32_t nativeBoss = _levelScriptLoader->GetActiveBossObjectID();
 			if (nativeBoss != 0) {
 				bossNumber = nativeBoss;
 			}
-			if (!_syncedOnce || bossActive == _synced.BossActive) {
-				bossActive = (nativeBoss != 0 || _levelScriptLoader->IsBossAreaActivated());
+			bool nativeBossActive = (nativeBoss != 0 || _levelScriptLoader->IsBossAreaActivated());
+			if (!_syncedOnce || bossActive == _syncedBossActive) {
+				bossActive = nativeBossActive;
 			}
-			_synced.BossActive = (nativeBoss != 0 || _levelScriptLoader->IsBossAreaActivated());
-			// The object the player stands on, if it's an object of the scripts (ThreedRealms tells its trapezes by it)
-			// - none while it dies (ThreedRealms would draw a player dying on a trapeze still hanging there)
+			_syncedBossActive = nativeBossActive;
+			_syncedOnce = true;
+			// The object the player stands on, if it's an object of the scripts (trapezes are told by it)
+			// - none while it dies (a player dying on a trapeze would be drawn still hanging there)
 			jjOBJ* standingOn = (_player->_carryingObject != nullptr && _player->GetHealth() > 0
 				? _levelScriptLoader->GetObjectView(_player->_carryingObject) : nullptr);
 			platform = (standingOn != nullptr ? standingOn->objectID : 0);
 		}
-		void jjPLAYER::SyncPropertiesFromBackingStore() {
-			if (_player == nullptr || !_syncedOnce) {
-				return;
+		bool jjPLAYER::FireScriptedWeapon(WeaponType weaponType) {
+			// The bullet of the weapon must have a behavior of the script, the behavior moves the bullets then
+			std::uint8_t bullet;
+			switch (weaponType) {
+				case WeaponType::Pepper: bullet = aPLAYERBULLET8; break;
+				case WeaponType::Electro: bullet = aPLAYERBULLET9; break;
+				default: bullet = (weaponType <= WeaponType::Toaster ? std::uint8_t(aPLAYERBULLET1 + std::int32_t(weaponType)) : std::uint8_t(0)); break;
+			}
+			const jjOBJ* preset = (bullet != 0 ? _levelScriptLoader->FindObjectPreset(bullet) : nullptr);
+			if (preset == nullptr || (preset->behavior.function == nullptr && preset->behavior.object == nullptr)) {
+				return false;
 			}
 
-			// In frames, 60 in a second
-			constexpr float TicksToFrames = 60.0f / 70.0f;
-
-			if (lives != _synced.Lives) {
-				_player->_lives = lives;
-			}
-			if (direction != _synced.Direction && direction != 0) {
-				_player->SetFacingLeft(direction < 0);
-			}
-			if (frozen != _synced.Frozen) {
-				if (frozen > 0) {
-					_player->Freeze(frozen * TicksToFrames);
-				} else if (_player->_frozenTimeLeft > 0.0f) {
-					_player->Freeze(0.0f);
+			// As JJ2+ fires by `SPREAD::Spread` (measured): RFNORMAL two bullets angled up and down, RFPU those and a straight
+			// one, RF two or three when powered up, every other spread one
+			constexpr std::int32_t SpreadRfNormal = 1, SpreadRfPowerUp = 2, SpreadRf = 3;
+			std::int32_t spread = _levelScriptLoader->GetWeapon(std::int32_t(weaponType) + 1)->spread;
+			bool upgraded = ((_player->_inventory.WeaponUpgrades[(std::int32_t)weaponType] & 0x01) != 0);
+			bool angled = (spread == SpreadRfNormal || spread == SpreadRfPowerUp || spread == SpreadRf);
+			bool straight = (!angled || spread == SpreadRfPowerUp || (spread == SpreadRf && upgraded));
+			for (std::int8_t slot = -1; slot <= 1; slot++) {
+				if (slot == 0 ? !straight : !angled) {
+					continue;
+				}
+				switch (weaponType) {
+					case WeaponType::Blaster: FireSpreadShot<Actors::Weapons::BlasterShot>(weaponType, slot); break;
+					case WeaponType::Bouncer: FireSpreadShot<Actors::Weapons::BouncerShot>(weaponType, slot); break;
+					case WeaponType::Freezer: FireSpreadShot<Actors::Weapons::FreezerShot>(weaponType, slot); break;
+					case WeaponType::Seeker: FireSpreadShot<Actors::Weapons::SeekerShot>(weaponType, slot); break;
+					case WeaponType::RF: FireSpreadShot<Actors::Weapons::RFShot>(weaponType, slot); break;
+					case WeaponType::Toaster: FireSpreadShot<Actors::Weapons::ToasterShot>(weaponType, slot); break;
+					case WeaponType::Pepper: FireSpreadShot<Actors::Weapons::PepperShot>(weaponType, slot); break;
+					case WeaponType::Electro: FireSpreadShot<Actors::Weapons::ElectroShot>(weaponType, slot); break;
+					default: break;
 				}
 			}
-			if (specialJump != _synced.SpecialJump) {
-				_player->_canDoubleJump = (specialJump == 0);
-			}
-			if (helicopter != _synced.Helicopter) {
-				_player->_copterFramesLeft = std::max(helicopter, 0) * TicksToFrames;
-			}
-			if (idle != _synced.Idle) {
-				_player->_idleTime = std::max(idle, 0) * TicksToFrames;
-			}
+			return true;
+		}
 
-			// A capped weapon isn't fired faster by tapping, one without its default sample is silent (the weapons of MLLE play
-			// their own sounds), as JJ2+ has the weapons
-			std::uint16_t cappedWeapons = 0, silentWeapons = 0;
-			for (std::int32_t i = 0; i < std::int32_t(WeaponType::Count); i++) {
-				const jjWEAPON* weapon = _levelScriptLoader->GetWeapon(i + 1);
-				if (weapon->style == wsCAPPED) {
-					cappedWeapons |= std::uint16_t(1 << i);
-				}
-				if (!weapon->defaultSample) {
-					silentWeapons |= std::uint16_t(1 << i);
-				}
-			}
-			_player->_cappedWeapons = cappedWeapons;
-			_player->_silentWeapons = silentWeapons;
+		template<typename T>
+		void jjPLAYER::FireSpreadShot(WeaponType weaponType, std::int8_t slot) {
+			Vector3i initialPos;
+			Vector2f gunspotPos;
+			float angle;
+			_player->GetFirePointAndAngle(initialPos, gunspotPos, angle);
+			float angleOffset = slot * (_player->IsFacingLeft() ? -0.2f : 0.2f);
 
-			// The handed-over values are what the player has now
-			_synced.Lives = lives;
-			_synced.Direction = direction;
-			_synced.Frozen = frozen;
-			_synced.SpecialJump = specialJump;
-			_synced.Helicopter = helicopter;
-			_synced.Idle = idle;
+			std::uint8_t shotParams[1] = { _player->_inventory.WeaponUpgrades[(std::int32_t)weaponType] };
+			std::shared_ptr<T> shot = std::make_shared<T>();
+			shot->OnActivated(Actors::ActorActivationDetails(_player->_levelHandler, initialPos, shotParams));
+			shot->OnFire(_player->shared_from_this(), gunspotPos, _player->_speed, angle + angleOffset, _player->IsFacingLeft());
+			// Its view is made as JJ2+ fires it when the level adds it (see LevelScriptLoader::EnsureObjectView())
+			_levelScriptLoader->_firingBullet = { shot.get(), slot, gunspotPos.Y - _player->_pos.Y };
+			_player->_levelHandler->AddActor(shot);
+			_levelScriptLoader->_firingBullet = {};
 		}
 
 		bool jjPLAYERDRAW::get_shield(std::int32_t shield) const {
@@ -1395,14 +1501,10 @@ namespace Jazz2::Scripting
 	}
 
 	std::int32_t get_jjPlayerCount() {
-		noop();
-		// TODO
 		auto owner = ScriptLoader::FromActiveContext<LevelScriptLoader>();
 		return owner->GetPlayers().size();
 	}
 	std::int32_t get_jjLocalPlayerCount() {
-		noop();
-		// TODO
 		auto owner = ScriptLoader::FromActiveContext<LevelScriptLoader>();
 		return owner->GetPlayers().size();
 	}
@@ -1421,6 +1523,23 @@ namespace Jazz2::Scripting
 
 		auto owner = ScriptLoader::FromActiveContext<LevelScriptLoader>();
 		return owner->GetPlayerBackingStore(index);
+	}
+
+	bool LevelScriptLoader::FirePlayerWeapon(Actors::Player* player, WeaponType weaponType)
+	{
+		jjPLAYER* p = GetPlayerBackingStore(player);
+		return (p != nullptr && p->FireScriptedWeapon(weaponType));
+	}
+
+	bool LevelScriptLoader::IsWeaponFireCapped(WeaponType weaponType)
+	{
+		// TNT, capped by default, is placed by every press as the weapon of the game places it
+		return (weaponType != WeaponType::TNT && GetWeapon(std::int32_t(weaponType) + 1)->style == Legacy::wsCAPPED);
+	}
+
+	bool LevelScriptLoader::IsWeaponSoundMuted(WeaponType weaponType)
+	{
+		return !GetWeapon(std::int32_t(weaponType) + 1)->defaultSample;
 	}
 
 	Legacy::jjWEAPON* LevelScriptLoader::GetWeapon(std::int32_t number)
@@ -1582,7 +1701,8 @@ namespace Jazz2::Scripting
 		engine->RegisterObjectMethod("jjPLAYER", "float get_ySpeed() const", asMETHOD(jjPLAYER, get_ySpeed), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "float set_ySpeed(float)", asMETHOD(jjPLAYER, set_ySpeed), asCALL_THISCALL);
 		engine->RegisterObjectProperty("jjPLAYER", "float jumpStrength", asOFFSET(jjPLAYER, jumpStrength));
-		engine->RegisterObjectProperty("jjPLAYER", "int8 frozen", asOFFSET(jjPLAYER, frozen));
+		engine->RegisterObjectMethod("jjPLAYER", "int8 get_frozen() const", asMETHOD(jjPLAYER, get_frozen), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int8 set_frozen(int8)", asMETHOD(jjPLAYER, set_frozen), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "void freeze(bool frozen = true)", asMETHOD(jjPLAYER, freeze), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "int get_currTile() const", asMETHOD(jjPLAYER, get_currTile), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "bool startSugarRush(int time = 1400)", asMETHOD(jjPLAYER, startSugarRush), asCALL_THISCALL);
@@ -1596,7 +1716,8 @@ namespace Jazz2::Scripting
 		
 		//engine->RegisterObjectMethod("jjPLAYER", "int get_lives() const", asMETHOD(jjPLAYER, get_lives), asCALL_THISCALL);
 		//engine->RegisterObjectMethod("jjPLAYER", "int set_lives(int)", asMETHOD(jjPLAYER, set_lives), asCALL_THISCALL);
-		engine->RegisterObjectProperty("jjPLAYER", "int lives", asOFFSET(jjPLAYER, lives));
+		engine->RegisterObjectMethod("jjPLAYER", "int get_lives() const", asMETHOD(jjPLAYER, get_lives), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int set_lives(int)", asMETHOD(jjPLAYER, set_lives), asCALL_THISCALL);
 
 		engine->RegisterObjectMethod("jjPLAYER", "int get_invincibility() const", asMETHOD(jjPLAYER, get_invincibility), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "int set_invincibility(int)", asMETHOD(jjPLAYER, set_invincibility), asCALL_THISCALL);
@@ -1619,7 +1740,8 @@ namespace Jazz2::Scripting
 		engine->RegisterObjectMethod("jjPLAYER", "int set_ballTime(int)", asMETHOD(jjPLAYER, set_rolling), asCALL_THISCALL);
 		engine->RegisterObjectProperty("jjPLAYER", "int boss", asOFFSET(jjPLAYER, bossNumber));
 		engine->RegisterObjectProperty("jjPLAYER", "bool bossActivated", asOFFSET(jjPLAYER, bossActive));
-		engine->RegisterObjectProperty("jjPLAYER", "int8 direction", asOFFSET(jjPLAYER, direction));
+		engine->RegisterObjectMethod("jjPLAYER", "int8 get_direction() const", asMETHOD(jjPLAYER, get_direction), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int8 set_direction(int8)", asMETHOD(jjPLAYER, set_direction), asCALL_THISCALL);
 		engine->RegisterObjectProperty("jjPLAYER", "int platform", asOFFSET(jjPLAYER, platform));
 		engine->RegisterObjectProperty("jjPLAYER", "const int flag", asOFFSET(jjPLAYER, flag));
 		engine->RegisterObjectProperty("jjPLAYER", "const int clientID", asOFFSET(jjPLAYER, clientID));
@@ -1628,15 +1750,19 @@ namespace Jazz2::Scripting
 		engine->RegisterObjectProperty("jjPLAYER", "const bool teamRed", asOFFSET(jjPLAYER, team));
 		engine->RegisterObjectMethod("jjPLAYER", "bool get_running() const", asMETHOD(jjPLAYER, get_running), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "bool set_running(bool)", asMETHOD(jjPLAYER, set_running), asCALL_THISCALL);
-		engine->RegisterObjectProperty("jjPLAYER", "bool alreadyDoubleJumped", asOFFSET(jjPLAYER, specialJump)); // Deprecated
-		engine->RegisterObjectProperty("jjPLAYER", "int doubleJumpCount", asOFFSET(jjPLAYER, specialJump));
+		engine->RegisterObjectMethod("jjPLAYER", "bool get_alreadyDoubleJumped() const", asMETHOD(jjPLAYER, get_alreadyDoubleJumped), asCALL_THISCALL); // Deprecated
+		engine->RegisterObjectMethod("jjPLAYER", "bool set_alreadyDoubleJumped(bool)", asMETHOD(jjPLAYER, set_alreadyDoubleJumped), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int get_doubleJumpCount() const", asMETHOD(jjPLAYER, get_doubleJumpCount), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int set_doubleJumpCount(int)", asMETHOD(jjPLAYER, set_doubleJumpCount), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "int get_stoned() const", asMETHOD(jjPLAYER, get_stoned), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "int set_stoned(int)", asMETHOD(jjPLAYER, set_stoned), asCALL_THISCALL);
 		engine->RegisterObjectProperty("jjPLAYER", "int buttstomp", asOFFSET(jjPLAYER, buttstomp));
-		engine->RegisterObjectProperty("jjPLAYER", "int helicopter", asOFFSET(jjPLAYER, helicopter));
+		engine->RegisterObjectMethod("jjPLAYER", "int get_helicopter() const", asMETHOD(jjPLAYER, get_helicopter), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int set_helicopter(int)", asMETHOD(jjPLAYER, set_helicopter), asCALL_THISCALL);
 		engine->RegisterObjectProperty("jjPLAYER", "int helicopterElapsed", asOFFSET(jjPLAYER, helicopterElapsed));
 		engine->RegisterObjectProperty("jjPLAYER", "int specialMove", asOFFSET(jjPLAYER, specialMove));
-		engine->RegisterObjectProperty("jjPLAYER", "int idle", asOFFSET(jjPLAYER, idle));
+		engine->RegisterObjectMethod("jjPLAYER", "int get_idle() const", asMETHOD(jjPLAYER, get_idle), asCALL_THISCALL);
+		engine->RegisterObjectMethod("jjPLAYER", "int set_idle(int)", asMETHOD(jjPLAYER, set_idle), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "void suckerTube(int xSpeed, int ySpeed, bool center, bool noclip = false, bool trigSample = false)", asMETHOD(jjPLAYER, suckerTube), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "void poleSpin(float xSpeed, float ySpeed, uint delay = 70)", asMETHOD(jjPLAYER, poleSpin), asCALL_THISCALL);
 		engine->RegisterObjectMethod("jjPLAYER", "void spring(float xSpeed, float ySpeed, bool keepZeroSpeeds, bool sample)", asMETHOD(jjPLAYER, spring), asCALL_THISCALL);

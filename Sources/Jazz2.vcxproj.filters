@@ -1104,6 +1104,9 @@
     <ClInclude Include="Jazz2\UI\Alignment.h">
       <Filter>Header Files\Jazz2\UI</Filter>
     </ClInclude>
+    <ClInclude Include="Jazz2\UI\BlendMode.h">
+      <Filter>Header Files\Jazz2\UI</Filter>
+    </ClInclude>
     <ClInclude Include="Jazz2\Actors\Solid\BarrelContainer.h">
       <Filter>Header Files\Jazz2\Actors\Solid</Filter>
     </ClInclude>
@@ -1935,6 +1938,9 @@
     <ClInclude Include="Jazz2\Editor\Runtime\RuntimeSync.h">
       <Filter>Header Files\Jazz2\Editor\Runtime</Filter>
     </ClInclude>
+    <ClInclude Include="Jazz2\Editor\Runtime\ScriptGraphics.h">
+      <Filter>Header Files\Jazz2\Editor\Runtime</Filter>
+    </ClInclude>
     <ClInclude Include="Jazz2\Editor\Runtime\TileLod.h">
       <Filter>Header Files\Jazz2\Editor\Runtime</Filter>
     </ClInclude>
@@ -2589,6 +2595,9 @@
       <Filter>Source Files\Jazz2\Editor\Runtime</Filter>
     </ClCompile>
     <ClCompile Include="Jazz2\Editor\Runtime\TileDrawing.cpp">
+      <Filter>Source Files\Jazz2\Editor\Runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="Jazz2\Editor\Runtime\ScriptGraphics.cpp">
       <Filter>Source Files\Jazz2\Editor\Runtime</Filter>
     </ClCompile>
     <ClCompile Include="Jazz2\Editor\Runtime\TileLod.cpp">

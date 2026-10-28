@@ -1,4 +1,4 @@
-﻿#include "Player.h"
+#include "Player.h"
 #include "../ContentResolver.h"
 #include "../ILevelHandler.h"
 #include "../Events/EventMap.h"
@@ -122,9 +122,6 @@ namespace Jazz2::Actors
 		_idleTime(0.0f),
 		_hitFloorTime(5.0f),
 		_keepRunningTime(0.0f),
-		_hPoleCarry(false),
-		_springCarry(false),
-		_revUpCarry(false),
 		_lastPoleTime(0.0f),
 		_inTubeTime(0.0f),
 		_dizzyTime(0.0f),
@@ -396,8 +393,7 @@ namespace Jazz2::Actors
 			return true;
 		}
 
-		if (_currentSpecialMove == SpecialMoveType::Buttstomp && _currentTransition != nullptr) {
-			// Buttstomp is probably in starting transition, do nothing yet
+		if (IsButtstompStarting()) {
 			return false;
 		}
 
@@ -441,7 +437,7 @@ namespace Jazz2::Actors
 
 	bool Player::IsLedgeClimbAllowed() const
 	{
-		return PreferencesCache::EnableLedgeClimb;
+		return _levelHandler->IsLedgeClimbEnabled(this);
 	}
 
 	bool Player::OnTileDeactivated()
@@ -595,7 +591,7 @@ namespace Jazz2::Actors
 		// Original JJ2: in air the rise decelerates ~3x faster than the fall accelerates, which gives the
 		// recognizable "snappy up, floaty down" arc. All three figures are the original's own, measured with
 		// the trajectory probe (see the constants in Player.h).
-		if (_pos.Y >= _levelHandler->GetWaterLevel()) {
+		if (_pos.Y >= _levelHandler->GetPlayerWaterLevel()) {
 			return LegacyWaterGravity;
 		}
 		// An uppercut is nearly weightless for its whole length, which is what lets 7.5 px/tick climb 228 px
@@ -891,7 +887,8 @@ namespace Jazz2::Actors
 		// that assignment takes over, but capping it here as well would put the tighter limit on every frame
 		// of a ladder ride where `_inFloatUpArea` is a frame stale, for one tick of a transition that the
 		// assignment overwrites anyway.
-		if (!_levelHandler->IsReforged()) {
+		// Without gravity (noclip of a tube) the speed is kept as it was given
+		if (!_levelHandler->IsReforged() && GetState(ActorState::ApplyGravitation)) {
 			float fallCap;
 			if (_currentSpecialMove == SpecialMoveType::Buttstomp) {
 				fallCap = (_inFloatUpArea ? LegacyFloatUpFallCap : LegacyButtstompSpeed);
@@ -1891,6 +1888,13 @@ namespace Jazz2::Actors
 		return (_isRunPressed || _dashGraceLeft > 0.0f);
 	}
 
+	bool Player::IsButtstompStarting() const
+	{
+		// Only its own start transition, a stomp forced by a spring can run under an unrelated one (e.g. warp-out pose)
+		return (_currentSpecialMove == SpecialMoveType::Buttstomp && _currentTransition != nullptr &&
+			_currentTransition->State == AnimState::TransitionButtstompStart);
+	}
+
 	std::int32_t Player::GetSlideStrength() const
 	{
 		// Only underfoot counts: it is a floor event, read one tile down like a belt is, and it cannot apply
@@ -2189,7 +2193,12 @@ namespace Jazz2::Actors
 						deceleration = (IsDashActive() ? LegacyDashDecel : LegacyWalkDecel);
 					}
 				}
-				_speed.X = std::max((absSpeedX - deceleration * timeMult), 0.0f) * (_speed.X < 0.0f ? -1.0f : 1.0f);
+				if (_inWater && !_levelHandler->IsReforged()) {
+					// Coasting, not braking, see LegacyWaterCoast
+					_speed.X = (absSpeedX < LegacyWaterCoastStop ? 0.0f : _speed.X * std::pow(LegacyWaterCoast, timeMult * LegacyFrameRateScale));
+				} else {
+					_speed.X = std::max((absSpeedX - deceleration * timeMult), 0.0f) * (_speed.X < 0.0f ? -1.0f : 1.0f);
+				}
 
 				// An accelerating belt is applied *after* the brake, and that ordering is the measurement: the
 				// original ramps xs 2.0, 3.878, 5.756 and then holds exactly 6.000, which is a step of half
@@ -3559,7 +3568,7 @@ namespace Jazz2::Actors
 		} else if (_wasFirePressed) {
 			_wasFirePressed = false;
 
-			if ((_cappedWeapons & (1 << (std::int32_t)_currentWeapon)) == 0) {
+			if (!_levelHandler->IsWeaponFireCapped(_currentWeapon)) {
 				_weaponCooldown = 0.0f;
 			}
 		}
@@ -3983,7 +3992,9 @@ namespace Jazz2::Actors
 
 	void Player::OnEmitLights(SmallVectorImpl<LightEmitter>& lights)
 	{
-		OnEmitRemotedLights(lights);
+		if (!_lightHiddenByScript) {
+			OnEmitRemotedLights(lights);
+		}
 
 		for (std::int32_t i = 0; i < (std::int32_t)_trail.size(); i++) {
 			lights.emplace_back(_trail[i]);
@@ -4076,13 +4087,13 @@ namespace Jazz2::Actors
 		bool handled = false;
 		bool removeSpecialMove = false;
 		if (auto* turtleShell = runtime_cast<Enemies::TurtleShell>(other)) {
-			if (_currentSpecialMove == SpecialMoveType::Buttstomp && _currentTransition != nullptr && _sugarRushLeft <= 0.0f) {
-				// Buttstomp is probably in starting transition, do nothing yet unless sugar rush is active
+			if (IsButtstompStarting() && _sugarRushLeft <= 0.0f) {
+				// Buttstomp is in starting transition, do nothing yet unless sugar rush is active
 			} else if (_currentSpecialMove != SpecialMoveType::None || _sugarRushLeft > 0.0f) {
 				other->DecreaseHealth(INT32_MAX, this);
 				handled = true;
 
-				if ((_currentAnimation->State & AnimState::Buttstomp) == AnimState::Buttstomp) {
+				if (_currentSpecialMove == SpecialMoveType::Buttstomp) {
 					removeSpecialMove = true;
 					_speed.Y *= -0.6f;
 					SetState(ActorState::CanJump, false);
@@ -4095,8 +4106,8 @@ namespace Jazz2::Actors
 			bool birdCharge = (_birdCharging && _levelHandler->IsReforged());
 			bool rammingFrozen = IsRammingFrozen(enemy);
 			bool otherAttack = (_currentSpecialMove != SpecialMoveType::None || _sugarRushLeft > 0.0f || rammingFrozen);
-			if (_currentSpecialMove == SpecialMoveType::Buttstomp && _currentTransition != nullptr && _sugarRushLeft <= 0.0f) {
-				// Buttstomp is probably in starting transition, do nothing yet unless sugar rush or shield is active
+			if (IsButtstompStarting() && _sugarRushLeft <= 0.0f) {
+				// Buttstomp is in starting transition, do nothing yet unless sugar rush or shield is active
 			} else if (otherAttack || birdCharge) {
 				// The charge alone hurts the same enemy only once per BirdChargeHitInterval, the bird goes through it
 				// unharmed in between
@@ -4120,7 +4131,7 @@ namespace Jazz2::Actors
 						}
 						_speed.Y *= -0.5f;
 					}
-					if ((_currentAnimation->State & AnimState::Buttstomp) == AnimState::Buttstomp) {
+					if (_currentSpecialMove == SpecialMoveType::Buttstomp) {
 						removeSpecialMove = true;
 						if (_levelHandler->IsReforged()) {
 							_speed.Y *= -0.6f;
@@ -4663,7 +4674,9 @@ namespace Jazz2::Actors
 				removeSpecialMove = false;
 				if (_activeModifier == Modifier::None) {
 					_currentSpecialMove = SpecialMoveType::Buttstomp;
-					SetAnimation(AnimState::Buttstomp);
+					if (_tubeBallPoseLeft <= 0.0f) {
+						SetAnimation(AnimState::Buttstomp);
+					}
 				}
 			} else {
 				removeSpecialMove = true;
@@ -4709,6 +4722,18 @@ namespace Jazz2::Actors
 			_currentTransition->State == AnimState::Spring) {
 			// The transition is deliberately non-cancellable, so nothing else can end it
 			ForceCancelTransition();
+		}
+
+		if (_tubeBallPoseLeft > 0.0f) {
+			_tubeBallPoseLeft -= timeMult;
+			if (!_inWater && _activeModifier == Modifier::None && !IsBird()) {
+				// A transition still plays over it, replacing it would cancel e.g. the buttstomp's start
+				ApplyStopAnimation(false);
+				if (_currentTransition == nullptr) {
+					SetAnimation(AnimState::Dash | AnimState::Jump);
+				}
+				return;
+			}
 		}
 
 		if (!_controllable) {
@@ -4830,6 +4855,10 @@ namespace Jazz2::Actors
 		} else {
 			// Only certain ones don't need to be preserved from earlier state, others should be set as expected
 			AnimState composite = (_currentAnimation->State & CompositeAnimMask);
+			// A buttstomp that ran under the tube's ball (see TubeBallPoseTime) gets its own pose back
+			if (_currentSpecialMove == SpecialMoveType::Buttstomp && !IsButtstompStarting()) {
+				composite |= AnimState::Buttstomp;
+			}
 
 			if (stopPoseShowing) {
 				// Sliding to a halt. The base state stays idle for the whole slide and the stop pose is drawn
@@ -5809,8 +5838,13 @@ namespace Jazz2::Actors
 			return;
 		}
 
+		// Far from the surface it's the water that moved (a script moves it so), not the player through the surface - taken at
+		// once, without the cooldown that keeps the player from bobbing in and out at the surface, without a splash and a push
+		const float waterLevel = _levelHandler->GetPlayerWaterLevel();
+		const bool farFromSurface = (std::abs(_pos.Y - waterLevel) > 40.0f);
+
 		if (_inWater) {
-			if (_pos.Y >= _levelHandler->GetWaterLevel()) {
+			if (_pos.Y >= waterLevel) {
 				SetState(ActorState::ApplyGravitation, false);
 
 				if (std::abs(_speed.X) > 1.0f || std::abs(_speed.Y) > 1.0f) {
@@ -5839,20 +5873,22 @@ namespace Jazz2::Actors
 					_renderer.AnimDuration = std::max(_currentAnimation->AnimDuration + 1.0f - Vector2f(_speed.X, _speed.Y).Length() * 0.26f, 0.4f);
 				}
 
-			} else if (_waterCooldownLeft <= 0.0f) {
+			} else if (_waterCooldownLeft <= 0.0f || farFromSurface) {
 				_inWater = false;
 				_waterCooldownLeft = 20.0f;
 
 				SetState(ActorState::ApplyGravitation | ActorState::CanJump, true);
-				_externalForce.Y = -0.6f;
 				_renderer.setRotation(0.0f);
 
 				SetAnimation(AnimState::Jump);
 
-				OnWaterSplash(Vector2f(_pos.X, _levelHandler->GetWaterLevel()), false);
+				if (!farFromSurface) {
+					_externalForce.Y = -0.6f;
+					OnWaterSplash(Vector2f(_pos.X, waterLevel), false);
+				}
 			}
 		} else {
-			if (_pos.Y >= _levelHandler->GetWaterLevel() && _waterCooldownLeft <= 0.0f) {
+			if (_pos.Y >= waterLevel && (_waterCooldownLeft <= 0.0f || farFromSurface)) {
 				_inWater = true;
 				_waterCooldownLeft = 20.0f;
 				_flyCheatActive = false;
@@ -5864,7 +5900,9 @@ namespace Jazz2::Actors
 				_controllable = true;
 				EndDamagingMove();
 
-				OnWaterSplash(Vector2f(_pos.X, _levelHandler->GetWaterLevel()), true);
+				if (!farFromSurface) {
+					OnWaterSplash(Vector2f(_pos.X, waterLevel), true);
+				}
 			}
 
 			// Adjust walking animation speed. Reforged's own rule, and now Reforged's alone: outside it
@@ -6199,9 +6237,17 @@ namespace Jazz2::Actors
 					break;
 				}
 
+				// The warp-out pose a player can still be in from a warp just before isn't drawn over the ball
+				if (_currentTransition != nullptr && (_currentTransition->State == AnimState::TransitionWarpOut ||
+					_currentTransition->State == AnimState::TransitionWarpOutFreefall)) {
+					_currentTransitionCancellable = true;
+					CancelTransition();
+				}
+
 				EndDamagingMove();
 
 				SetAnimation(AnimState::Dash | AnimState::Jump);
+				_tubeBallPoseLeft = TubeBallPoseTime;
 
 				_controllable = false;
 				SetState(ActorState::CanJump, false);
@@ -6246,6 +6292,12 @@ namespace Jazz2::Actors
 				}
 
 				SetState(ActorState::CollideWithTileset, !becomeNoclip);
+				// Noclip has no gravity either, the speed of the tube is kept until a tube of noclip only ends it
+				if (becomeNoclip) {
+					SetState(ActorState::ApplyGravitation, false);
+				} else if (!_levelHandler->IsReforged()) {
+					SetState(ActorState::ApplyGravitation, true);
+				}
 				_inTubeTime = (becomeNoclip ? 600.0f : TubeControlTime);
 				return true;
 			}
@@ -6647,7 +6699,7 @@ namespace Jazz2::Actors
 			case WeaponType::Electro: FireBirdShotPair<Weapons::ElectroShot, WeaponType::Electro>(spread); break;
 			default: {
 				FireBirdShotPair<Weapons::BlasterShot, WeaponType::Blaster>(spread);
-				if ((_silentWeapons & (1 << (std::int32_t)WeaponType::Blaster)) == 0) {
+				if (!_levelHandler->IsWeaponSoundMuted(WeaponType::Blaster)) {
 					PlayPlayerSfx("WeaponBlaster"_s);
 				}
 				ammoDecrease = 0;
@@ -6845,7 +6897,15 @@ namespace Jazz2::Actors
 
 		std::uint16_t ammoDecrease = 256;
 
-		switch (weaponType) {
+		// The level may fire the shots itself (a script that controls the bullets), the blaster only without a shield
+		if (!(weaponType == WeaponType::Blaster && _activeShield != ShieldType::None) && _levelHandler->HandlePlayerFire(this, weaponType)) {
+			std::int32_t fastFire = (_inventory.WeaponUpgrades[(std::int32_t)WeaponType::Blaster] >> 1);
+			_weaponCooldown = 30.0f - (fastFire * 2.76f);
+			EmitWeaponFlare();
+			if (weaponType == WeaponType::Blaster) {
+				ammoDecrease = 0;
+			}
+		} else switch (weaponType) {
 			case WeaponType::Blaster:
 				switch (_activeShield) {
 					case ShieldType::Fire: {
@@ -6865,7 +6925,7 @@ namespace Jazz2::Actors
 					}
 					default: {
 						FireWeapon<Weapons::BlasterShot, WeaponType::Blaster>(30.0f, 2.76f, true);
-						if ((_silentWeapons & (1 << (std::int32_t)WeaponType::Blaster)) == 0) {
+						if (!_levelHandler->IsWeaponSoundMuted(WeaponType::Blaster)) {
 							PlayPlayerSfx("WeaponBlaster"_s);
 						}
 						break;

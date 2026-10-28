@@ -48,6 +48,8 @@ namespace Jazz2::Editor
 		static inline Colorf ButtonPressed = Colorf(0.14f, 0.12f, 0.26f, 0.95f);
 		static inline Colorf ButtonChecked = Colorf(0.55f, 0.40f, 0.12f, 0.95f);
 		static inline Colorf ButtonCheckedHover = Colorf(0.66f, 0.49f, 0.16f, 0.95f);
+		// Of a button pointed at or pressed, lighter than its fill, softer than the accent of a checked one
+		static inline Colorf ButtonOutline = Colorf(0.43f, 0.38f, 0.60f, 0.95f);
 
 		static inline Colorf Accent = Colorf(0.95f, 0.74f, 0.25f, 1.0f);
 		static inline Colorf AccentDim = Colorf(0.70f, 0.55f, 0.20f, 1.0f);
@@ -65,6 +67,11 @@ namespace Jazz2::Editor
 		static inline Colorf GridLine = Colorf(1.0f, 1.0f, 1.0f, 0.13f);
 		static inline Colorf GridLineStrong = Colorf(1.0f, 1.0f, 1.0f, 0.24f);
 		static inline Colorf Cursor = Colorf(1.0f, 1.0f, 1.0f, 0.85f);
+
+		/** @brief How much of the opacity of the background of a panel is kept over a blurred picture of the level, see @ref UiPainter::Backdrop() */
+		static constexpr float BackdropFillOpacity = 0.8f;
+		/** @brief How much of the opacity of the background of a window, a menu or a message is kept over a blurred picture of what is behind it */
+		static constexpr float BackdropWindowFillOpacity = 0.93f;
 
 		/** @} */
 
@@ -153,10 +160,10 @@ namespace Jazz2::Editor
 		static constexpr float Spacing = 3.0f;
 		static constexpr float CornerRadius = 3.0f;
 		static constexpr float RowHeight = 14.0f;
-		static constexpr float ButtonHeight = 16.0f;
+		static constexpr float ButtonHeight = 18.0f;
 		static constexpr float IconSize = 16.0f;
-		static constexpr float MenuBarHeight = 15.0f;
-		static constexpr float ToolbarHeight = 22.0f;
+		static constexpr float MenuBarHeight = 17.0f;
+		static constexpr float ToolbarHeight = 26.0f;
 		static constexpr float StatusBarHeight = 15.0f;
 		static constexpr float ScrollBarWidth = 5.0f;
 		static constexpr float ShadowSize = 6.0f;

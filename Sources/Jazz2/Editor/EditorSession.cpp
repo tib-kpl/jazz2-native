@@ -14,7 +14,8 @@ namespace Jazz2::Editor
 	}
 
 	EditorSession::EditorSession(IRootController* root)
-		: _root(root), _shell(nullptr), _showPlayPath(true), _currentLayer(0), _showGrid(true), _maskMode(0), _showEvents(true),
+		: _root(root), _shell(nullptr), _showPlayPath(true), _playReforged(PreferencesCache::EnableReforgedGameplay),
+			_playLedgeClimb(PreferencesCache::EnableLedgeClimb), _currentLayer(0), _showGrid(true), _maskMode(0), _showEvents(true),
 			_pickerPanel(PickerPanel::Tiles)
 	{
 		_playTest = std::make_unique<PlayTestController>(static_cast<IPlayTestHost&>(*this));
@@ -50,6 +51,8 @@ namespace Jazz2::Editor
 	EditorSession::~EditorSession()
 	{
 		_files->ReleaseLock();
+		_settings.Tool = std::int32_t(_tools->GetChosenType());
+		_settings.PickerEvents = (_pickerPanel == PickerPanel::Events);
 		_settings.Save();
 		// The interface refers to the session, so it goes first
 		_surface = nullptr;
@@ -146,6 +149,12 @@ namespace Jazz2::Editor
 		_actions.CaptureDefaults();
 		_actions.LoadOverrides(GetHotkeysPath());
 		CreateInterface();
+		// The tool and the picker as the editor was left
+		EditorToolType tool = EditorToolType(_settings.Tool);
+		if (tool < EditorToolType::Count && tool != EditorToolType::TilePixels) {
+			_tools->SetActive(tool);
+		}
+		_pickerPanel = (_settings.PickerEvents ? PickerPanel::Events : PickerPanel::Tiles);
 		_files->ShowEventExtensionErrors();
 		// The script and the tile sets changed outside of the editor, and another editor with the same level
 		_files->WatchFiles();
@@ -192,6 +201,37 @@ namespace Jazz2::Editor
 				transition.DrawRing(painter, screenSize);
 			}
 		};
+		// Panels and what is over them are drawn into the image of the level while editing, it's blurred below the panels
+		// and as a whole then, see EditorLevelHandler::SetFrameBlur()
+		_surface->DrawsPanelsInLevel = [this]() {
+			return (_editHandler != nullptr && _playTest->IsEditing() && _playTest->GetGameHandler() == nullptr && _editHandler->CanBlurFrameBelow());
+		};
+		// Only the editor's view, the game's blur is taken before its lighting
+		_surface->GetBackdrop = [this](UiBackdrop backdrop, Vector2f screenSize, Rectf& bounds, bool inLevel) -> const Texture* {
+#if defined(RHI_CAP_POSTPROCESSING)
+			if (!PreferencesCache::BlurEffects || _editHandler == nullptr || _playTest->GetGameHandler() != nullptr) {
+				return nullptr;
+			}
+			if (inLevel) {
+				// The image of the level is at the size of the screen in the editor
+				bounds = Rectf(0.0f, 0.0f, screenSize.X, screenSize.Y);
+				Texture* whole = (backdrop == UiBackdrop::Overlays ? _editHandler->GetFrameBlur() : nullptr);
+				return (whole != nullptr ? whole : _editHandler->RequestFrameBlurBelow(UiSurface::GetPanelsDepth()));
+			}
+			// The level without what is shown over it
+			Rendering::PlayerViewport* viewport = _editHandler->GetViewport();
+			Vector2i viewSize = _editHandler->GetViewSize();
+			if (viewport == nullptr || viewSize.X <= 0 || viewSize.Y <= 0) {
+				return nullptr;
+			}
+			Rectf viewBounds = viewport->GetBounds();
+			float scaleX = screenSize.X / float(viewSize.X), scaleY = screenSize.Y / float(viewSize.Y);
+			bounds = Rectf(viewBounds.X * scaleX, viewBounds.Y * scaleY, viewBounds.W * scaleX, viewBounds.H * scaleY);
+			return viewport->GetBlurredTarget();
+#else
+			return nullptr;
+#endif
+		};
 		// Events that turn by the tiles around them are shown turned as the game turns them
 		_eventPreviews.IsAreaEmpty = [this](const AABBf& aabb) {
 			Tiles::TileMap* tileMap = (_editHandler != nullptr ? _editHandler->TileMap() : nullptr);
@@ -201,6 +241,11 @@ namespace Jazz2::Editor
 			Tiles::TileCollisionParams params = { Tiles::TileDestructType::None, true };
 			return tileMap->IsTileEmpty(aabb, params);
 		};
+#if defined(WITH_ANGELSCRIPT)
+		_eventPreviews.ScriptSprite = [this](const Formats::EventRecord& event, bool animated, bool ownAnimated) -> GraphicResource* {
+			return (_settings.OverriddenAssets ? _scriptGraphics.Find(event, animated, ownAnimated) : nullptr);
+		};
+#endif
 	}
 
 	ToolManager& EditorSession::GetTools()
@@ -369,6 +414,9 @@ namespace Jazz2::Editor
 			// Indexed tiles and sprites take their colors from the palette as they're drawn, so it's enough to replace it,
 			// before the overridden tiles of a tile set that isn't indexed are made again with it
 			ContentResolver::Get().SetSpritePalette(_document.LevelPalette);
+		}
+		if (!reload && changes.HasAny(DocumentChangeKind::Palette)) {
+			_editHandler->TileMap()->SetAdditionalPalettes(_document.AdditionalPalettes);
 		}
 		if (!reload && changes.HasAny(DocumentChangeKind::TileOverrides | DocumentChangeKind::Palette)) {
 			reload = !ApplyTileOverrides(changes.HasAny(DocumentChangeKind::Palette));
@@ -587,6 +635,23 @@ namespace Jazz2::Editor
 		return _eventPreviews;
 	}
 
+#if defined(WITH_ANGELSCRIPT)
+	void EditorSession::UpdateScriptGraphics()
+	{
+		if (!_scriptGraphicsDirty) {
+			return;
+		}
+		_scriptGraphicsDirty = false;
+		if (!_settings.OverriddenAssets) {
+			_scriptGraphics.Clear();
+			return;
+		}
+		_scriptGraphics.Capture(&GetPlayTestRoot(), _document, _files->GetLevelName(), _files->GetFilePath());
+		// The level of the script named the window after itself
+		_files->UpdateWindowTitle();
+	}
+#endif
+
 	float EditorSession::GetAnimTime() const
 	{
 		return (_surface != nullptr ? _surface->AnimTime : 0.0f);
@@ -643,9 +708,18 @@ namespace Jazz2::Editor
 			// The colors of the tiles for the view from far away are prepared ahead, not while the view flies into the game
 			if (_playTest->IsEditing()) {
 				_tileLod->WarmUp(TileLod::WarmUpMilliseconds);
+#if defined(WITH_ANGELSCRIPT)
+				UpdateScriptGraphics();
+#endif
 			}
 			if (_smartTilesUsed && !_smartTiles.IsReady()) {
 				_smartTiles.Update();
+			}
+			// Panels blur the level with what is shown over it, windows and menus also the panels
+			if (_surface != nullptr) {
+				bool editing = _playTest->IsEditing();
+				_editHandler->SetFrameBlur(editing, editing && _surface->HasOverlays());
+				_editHandler->SetFrameContent(_surface->GetPanelsNode());
 			}
 			_editHandler->OnBeginFrame();
 		}
@@ -924,6 +998,9 @@ namespace Jazz2::Editor
 		Vector2i res = theApplication().GetResolution();
 		OnInitializeViewport(res.X, res.Y);
 		_runtimeBuildCount++;
+#if defined(WITH_ANGELSCRIPT)
+		_scriptGraphicsDirty = true;
+#endif
 		// The flat layers stay as they were
 		viewOptions.ReferenceViewSize = _editHandler->GetReferenceViewSize();
 		_editHandler->TileMap()->SetViewOptions(viewOptions);

@@ -146,7 +146,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -170,7 +170,7 @@
       <EnableEnhancedInstructionSet>NoExtensions</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -195,7 +195,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -216,7 +216,7 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -240,7 +240,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -265,7 +265,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ExtensionLibraryPath);$(ProjectDir)Dependencies\angelscript\include;$(ProjectDir)..\Libs\Includes;$(ProjectDir)Dependencies;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
@@ -538,6 +538,7 @@
     <ClInclude Include="Jazz2\Editor\Runtime\PlayTestMpLevelHandler.h" />
     <ClInclude Include="Jazz2\Editor\Runtime\PlayTransition.h" />
     <ClInclude Include="Jazz2\Editor\Runtime\RuntimeSync.h" />
+    <ClInclude Include="Jazz2\Editor\Runtime\ScriptGraphics.h" />
     <ClInclude Include="Jazz2\Editor\Runtime\TileLod.h" />
     <ClInclude Include="Jazz2\Editor\Session\DocumentFiles.h" />
     <ClInclude Include="Jazz2\Editor\Session\EditorDebugConsole.h" />
@@ -661,6 +662,7 @@
     <ClInclude Include="Jazz2\Tiles\TileCollisionParams.h" />
     <ClInclude Include="Jazz2\Tiles\TileDestructType.h" />
     <ClInclude Include="Jazz2\UI\Alignment.h" />
+    <ClInclude Include="Jazz2\UI\BlendMode.h" />
     <ClInclude Include="Jazz2\UI\Canvas.h" />
     <ClInclude Include="Jazz2\UI\Cinematics.h" />
     <ClInclude Include="Jazz2\UI\DiscordRpcClient.h" />
@@ -1417,6 +1419,7 @@
     <ClCompile Include="Jazz2\Editor\Runtime\PlayTransition.cpp" />
     <ClCompile Include="Jazz2\Editor\Runtime\RuntimeSync.cpp" />
     <ClCompile Include="Jazz2\Editor\Runtime\TileDrawing.cpp" />
+    <ClCompile Include="Jazz2\Editor\Runtime\ScriptGraphics.cpp" />
     <ClCompile Include="Jazz2\Editor\Runtime\TileLod.cpp" />
     <ClCompile Include="Jazz2\Editor\Session\DocumentFiles.cpp" />
     <ClCompile Include="Jazz2\Editor\Session\EditorDebugConsole.cpp" />
@@ -1515,6 +1518,11 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="Icons\Main.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="Dependencies\angelscript\angelscript.vcxproj">
+      <Project>{6981341A-BE18-4FBB-AF99-83646BF3FE6F}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

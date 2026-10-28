@@ -7,28 +7,13 @@
 #include <Containers/StringConcatenable.h>
 #include <IO/FileSystem.h>
 
-#if defined(DEATH_TARGET_WINDOWS) && !defined(CMAKE_BUILD)
-#   if defined(_M_X64)
-#		if defined(_DEBUG)
-#			pragma comment(lib, "../Libs/Windows/x64/angelscriptd.lib")
-#		else
-#			pragma comment(lib, "../Libs/Windows/x64/angelscript.lib")
-#		endif
-#   elif defined(_M_IX86)
-#		if defined(_DEBUG)
-#			pragma comment(lib, "../Libs/Windows/x86/angelscriptd.lib")
-#		else
-#			pragma comment(lib, "../Libs/Windows/x86/angelscript.lib")
-#		endif
-#   else
-#       error Unsupported architecture
-#   endif
-#endif
-
 using namespace Death::IO;
 
 namespace Jazz2::Scripting
 {
+	asIScriptEngine* ScriptLoader::_lastEngine = nullptr;
+	void* ScriptLoader::_lastOwner = nullptr;
+
 	ScriptLoader::ScriptLoader()
 		: _module(nullptr), _scriptContextType(ScriptContextType::Unknown)
 	{
@@ -57,8 +42,13 @@ namespace Jazz2::Scripting
 		}
 
 		if (_engine != nullptr) {
+			asIScriptEngine* engine = _engine;
 			_engine->ShutDownAndRelease();
 			_engine = nullptr;
+			if (_lastEngine == engine) {
+				_lastEngine = nullptr;
+				_lastOwner = nullptr;
+			}
 		}
 	}
 
@@ -555,8 +545,22 @@ namespace Jazz2::Scripting
 		std::uint32_t len = 0;
 
 		// Skip until ; or { whichever comes first
+		char prevSignificant = '\0';
 		while (pos < scriptSize && scriptContent[pos] != ';' && scriptContent[pos] != '{') {
-			_engine->ParseToken(&scriptContent[pos], scriptSize - pos, &len);
+			asETokenClass t = _engine->ParseToken(&scriptContent[pos], scriptSize - pos, &len);
+			if (t == asTC_IDENTIFIER && prevSignificant != '@' && prevSignificant != '.') {
+				// Scripts of JJ2+ declare value conversions as `jjPALCOLOR opImplCast()`, which AngelScript means for handles
+				// only - its compiler asserts on such a method (JJ2+ has the asserts compiled out), the conversion is the same
+				MutableStringView identifier(&scriptContent[pos], len);
+				if (identifier == "opImplCast"_s) {
+					std::memcpy(&scriptContent[pos], "opImplConv", len);
+				} else if (identifier == "opCast"_s) {
+					std::memcpy(&scriptContent[pos], "opConv", len);
+				}
+			}
+			if (t != asTC_COMMENT && t != asTC_WHITESPACE) {
+				prevSignificant = scriptContent[pos + len - 1];
+			}
 			pos += len;
 		}
 

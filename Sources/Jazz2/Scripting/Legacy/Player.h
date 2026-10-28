@@ -78,8 +78,10 @@ namespace Jazz2::Scripting
 
 			/** @brief Strength of the player's jump */
 			float jumpStrength = 0.0f;
-			/** @brief Number of frames the player remains frozen */
-			std::int8_t frozen = 0;
+			/** @brief Returns the number of ticks the player remains frozen */
+			std::int8_t get_frozen() const;
+			/** @brief Sets the number of ticks the player remains frozen */
+			std::int8_t set_frozen(std::int8_t value);
 
 			/** @brief Freezes or unfreezes the player */
 			void freeze(bool frozen);
@@ -104,15 +106,17 @@ namespace Jazz2::Scripting
 			/** @brief Sets the currently selected weapon */
 			std::int8_t set_currWeapon(std::int8_t value);
 
-			//std::int32_t get_lives() const;
-			//std::int32_t set_lives(std::int32_t value);
-			/** @brief Number of remaining lives */
-			std::int32_t lives = 0;
+			/** @brief Returns the number of remaining lives */
+			std::int32_t get_lives() const;
+			/** @brief Sets the number of remaining lives */
+			std::int32_t set_lives(std::int32_t value);
 
 			/** @brief Returns the remaining invincibility duration */
 			std::int32_t get_invincibility() const;
 			/** @brief Sets the remaining invincibility duration */
 			std::int32_t set_invincibility(std::int32_t value);
+			std::uint32_t get_lightType() const;
+			std::uint32_t set_lightType(std::uint32_t value);
 			/** @brief Returns the remaining blink (post-hit flicker) duration */
 			std::int32_t get_blink() const;
 			/** @brief Sets the remaining blink (post-hit flicker) duration */
@@ -155,8 +159,10 @@ namespace Jazz2::Scripting
 			std::int32_t boss = 0;
 			/** @brief Whether the player's boss is active */
 			bool bossActive = false;
-			/** @brief Facing direction of the player */
-			std::int8_t direction = 0;
+			/** @brief Returns the facing direction of the player */
+			std::int8_t get_direction() const;
+			/** @brief Sets the facing direction of the player, 0 keeps it */
+			std::int8_t set_direction(std::int8_t value);
 			/** @brief Object id of the platform the player is standing on */
 			std::int32_t platform = 0;
 			/** @brief Capture-the-flag flag state */
@@ -177,8 +183,14 @@ namespace Jazz2::Scripting
 			/** @brief Sets whether the player is running */
 			bool set_running(bool value);
 
-			/** @brief Remaining special-jump duration */
-			std::int32_t specialJump = 0;
+			/** @brief Returns the number of double jumps made in the air */
+			std::int32_t get_doubleJumpCount() const;
+			/** @brief Sets the number of double jumps made in the air */
+			std::int32_t set_doubleJumpCount(std::int32_t value);
+			/** @brief Returns whether the player made a double jump in the air */
+			bool get_alreadyDoubleJumped() const;
+			/** @brief Sets whether the player made a double jump in the air */
+			bool set_alreadyDoubleJumped(bool value);
 
 			/** @brief Returns the remaining stoned (dizzy) duration */
 			std::int32_t get_stoned();
@@ -187,14 +199,18 @@ namespace Jazz2::Scripting
 
 			/** @brief Remaining buttstomp duration */
 			std::int32_t buttstomp = 0;
-			/** @brief Remaining helicopter (copter) duration */
-			std::int32_t helicopter = 0;
+			/** @brief Returns the remaining helicopter (copter) duration in ticks */
+			std::int32_t get_helicopter() const;
+			/** @brief Sets the remaining helicopter (copter) duration in ticks */
+			std::int32_t set_helicopter(std::int32_t value);
 			/** @brief Elapsed helicopter (copter) time */
 			std::int32_t helicopterElapsed = 0;
 			/** @brief Active special move */
 			std::int32_t specialMove = 0;
-			/** @brief Number of frames the player has been idle */
-			std::int32_t idle = 0;
+			/** @brief Returns the number of ticks the player has been idle */
+			std::int32_t get_idle() const;
+			/** @brief Sets the number of ticks the player has been idle */
+			std::int32_t set_idle(std::int32_t value);
 
 			/** @brief Moves the player through a sucker tube at the given speed */
 			void suckerTube(std::int32_t xSpeed, std::int32_t ySpeed, bool center, bool noclip, bool trigSample);
@@ -443,6 +459,9 @@ namespace Jazz2::Scripting
 			/** @brief Returns the current frame id within the animation */
 			std::uint8_t get_frameID() const;
 
+			/** @brief Fires the bullets of a weapon whose bullets a script controls, see @ref LevelScriptLoader::FirePlayerWeapon() */
+			bool FireScriptedWeapon(WeaponType weaponType);
+
 		private:
 			LevelScriptLoader* _levelScriptLoader;
 			Actors::Player* _player;
@@ -452,13 +471,8 @@ namespace Jazz2::Scripting
 			float _timerLeft;
 			bool _timerPersists;
 
-			// The writable properties as they were given to the script last, the ones a script changed are told apart by them
-			struct SyncedState {
-				std::int32_t Lives, SpecialJump, Helicopter, Idle;
-				std::int8_t Direction, Frozen;
-				bool BossActive;
-			};
-			SyncedState _synced = {};
+			// `bossActive` as it was given to the script last, a change of the script stays
+			bool _syncedBossActive = false;
 			bool _syncedOnce = false;
 
 			// Finds the animation of the original the player shows and the frame of it, false if it's none of them
@@ -481,10 +495,12 @@ namespace Jazz2::Scripting
 			// The ammo JJ2+ shows of each weapon of `jjWEAPON::infinite`, the player has unlimited ammo of it
 			std::uint16_t _infiniteAmmo[std::int32_t(WeaponType::Count)] = {};
 
-			// Gives the properties what the player is now, except the ones a script changed since and didn't hand over yet
+			// Fires one bullet of the spread, -1 angled up, 0 straight, 1 angled down
+			template<typename T>
+			void FireSpreadShot(WeaponType weaponType, std::int8_t slot);
+
+			// Gives the properties what the player is now, except `bossActive` if a script changed it
 			void SyncPropertiesToBackingStore();
-			// Hands what a script changed of the properties over to the player
-			void SyncPropertiesFromBackingStore();
 		};
 
 		/**
