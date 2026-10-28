@@ -147,8 +147,9 @@ jobs:
 
     - name: 'Create AppImage'
       run: |
-        curl -s -S -O --location 'https://github.com/darealshinji/linuxdeploy-plugin-checkrt/releases/download/continuous/linuxdeploy-plugin-checkrt.sh'
-        curl -s -S -O --location 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
+        # Avoid HTTP/2 framing failures and retry transient release-download errors.
+        curl --http1.1 --fail --silent --show-error --location --retry 5 --retry-all-errors --connect-timeout 15 --max-time 180 --remote-name 'https://github.com/darealshinji/linuxdeploy-plugin-checkrt/releases/download/continuous/linuxdeploy-plugin-checkrt.sh'
+        curl --http1.1 --fail --silent --show-error --location --retry 5 --retry-all-errors --connect-timeout 15 --max-time 180 --remote-name 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
         chmod a+x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-checkrt.sh
 
         mv -f ./_appdir/usr/share/jazz2/Content/ ./_appdir/usr/bin/Content/
