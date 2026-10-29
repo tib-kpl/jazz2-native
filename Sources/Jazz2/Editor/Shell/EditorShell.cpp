@@ -626,6 +626,13 @@ namespace Jazz2::Editor
 			// Presets of the shortcuts are chosen in the shortcuts dialog
 			addActions(entries, { ActionIds::HelpCommands, ActionIds::HelpShortcuts });
 		});
+
+		// The cross on the right closes the editor, as the one of a window does
+		_menuBar->Add<UiElement>()->Flex = 1.0f;
+		if (UiButton* exit = AddActionButton(_menuBar, ActionIds::FileExit)) {
+			exit->Width = UiTheme::MenuBarHeight + 6.0f;
+			exit->Height = UiTheme::MenuBarHeight;
+		}
 	}
 
 	void EditorShell::CreateToolbar()
@@ -921,17 +928,20 @@ namespace Jazz2::Editor
 			const Colorf& fill = UiTheme::PanelHeader;
 			float top = _safeArea.Y - Bounds.Y, bottom = Bounds.Y + Bounds.H - (_safeArea.Y + _safeArea.H);
 			float left = _safeArea.X - Bounds.X, right = Bounds.X + Bounds.W - (_safeArea.X + _safeArea.W);
+			auto fillEdge = [&painter, &fill](const Rectf& rect) {
+				painter.FillRect(rect, painter.Backdrop(rect, fill, false), UiLayer::Back);
+			};
 			if (top > 0.0f) {
-				painter.FillRect(Rectf(Bounds.X, Bounds.Y, Bounds.W, top), fill, UiLayer::Back);
+				fillEdge(Rectf(Bounds.X, Bounds.Y, Bounds.W, top));
 			}
 			if (bottom > 0.0f) {
-				painter.FillRect(Rectf(Bounds.X, _safeArea.Y + _safeArea.H, Bounds.W, bottom), fill, UiLayer::Back);
+				fillEdge(Rectf(Bounds.X, _safeArea.Y + _safeArea.H, Bounds.W, bottom));
 			}
 			if (left > 0.0f) {
-				painter.FillRect(Rectf(Bounds.X, _safeArea.Y, left, _safeArea.H), fill, UiLayer::Back);
+				fillEdge(Rectf(Bounds.X, _safeArea.Y, left, _safeArea.H));
 			}
 			if (right > 0.0f) {
-				painter.FillRect(Rectf(_safeArea.X + _safeArea.W, _safeArea.Y, right, _safeArea.H), fill, UiLayer::Back);
+				fillEdge(Rectf(_safeArea.X + _safeArea.W, _safeArea.Y, right, _safeArea.H));
 			}
 		}
 
@@ -1983,11 +1993,11 @@ namespace Jazz2::Editor
 					// The text the event refers to, above it, or the level an exit without one goes to
 					String text;
 					if (!EventPreviews::DescribeDefaultLevel(document, event, field, text)) {
-						std::int32_t index = EventCatalog::ReadField(event, field);
-						if (index < 0 || index >= std::int32_t(document.Texts.size()) || document.Texts[index].empty()) {
+						StringView used;
+						if (!EventPreviews::GetUsedText(document, event, field, used)) {
 							continue;
 						}
-						text = EventCatalog::MakeTextPreview(document.Texts[index], 48);
+						text = EventCatalog::MakeTextPreview(used, 48);
 					}
 					if (text.empty()) {
 						continue;
