@@ -1031,6 +1031,7 @@ namespace Jazz2::Scripting
 
 	void ScriptLoader::Message(const asSMessageInfo& msg)
 	{
+#if defined(DEATH_TRACE)
 		TraceLevel level;
 		switch (msg.type) {
 			case asMSGTYPE_ERROR: level = TraceLevel::Error; break;
@@ -1039,10 +1040,13 @@ namespace Jazz2::Scripting
 		}
 
 		if (msg.section != nullptr && msg.section[0] != '\0') {
-			__DEATH_TRACE(level, "AS!", "{}:{}({}): {}", msg.section, msg.row, msg.col, msg.message);
+			__DEATH_TRACE(level, "AngelScript!", "{}:{}({}): {}", msg.section, msg.row, msg.col, msg.message);
 		} else {
-			__DEATH_TRACE(level, "AS!", "{}", msg.message);
+			__DEATH_TRACE(level, "AngelScript!", "{}", msg.message);
 		}
+#else
+		static_cast<void>(msg);
+#endif
 	}
 }
 

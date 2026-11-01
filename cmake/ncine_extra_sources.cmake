@@ -902,6 +902,10 @@ endif()
 if(ANGELSCRIPT_FOUND)
 	target_compile_definitions(${NCINE_APP} PRIVATE "WITH_ANGELSCRIPT")
 	target_link_libraries(${NCINE_APP} PRIVATE Angelscript)
+	# The external includes directory can still contain an older angelscript.h, the bundled one must come first
+	get_target_property(_angelscriptIncludeDirs Angelscript INTERFACE_INCLUDE_DIRECTORIES)
+	target_include_directories(${NCINE_APP} BEFORE PRIVATE ${_angelscriptIncludeDirs})
+	unset(_angelscriptIncludeDirs)
 endif()
 
 if(NCINE_WITH_IMGUI AND NOT DEDICATED_SERVER)
@@ -2107,6 +2111,7 @@ if(WITH_EDITOR)
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/ToolOptionsBar.h
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponsDialog.h
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponScripts.h
+		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponTemplates.h
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponPreview.h
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Smart/RulesFile.h
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Smart/SmartTileModel.h
@@ -2251,6 +2256,7 @@ if(WITH_EDITOR)
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/ToolOptionsBar.cpp
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponsDialog.cpp
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponScripts.cpp
+		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponTemplates.cpp
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Shell/WeaponPreview.cpp
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Smart/RulesFile.cpp
 		${NCINE_SOURCE_DIR}/Jazz2/Editor/Smart/SmartTileModel.cpp
