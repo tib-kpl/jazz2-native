@@ -24,6 +24,9 @@
 #include "../Compatibility/AnimSetMapping.h"
 #include "../Compatibility/EventConverter.h"
 #include "../Compatibility/JJ2Strings.h"
+#if defined(WITH_LEVEL_PACKS)
+#	include "../LevelPacks/LevelPackLibrary.h"
+#endif
 #include "../Rendering/PlayerViewport.h"
 #include "../UI/HUD.h"
 #include "../UI/InGameConsole.h"
@@ -223,6 +226,7 @@ shared interface MLLEWeaponApply { bool Apply(uint, se::WeaponHook@ = null, jjST
 			default: DifficultyAtLevelStart = 1; break;
 			case GameDifficulty::Hard: DifficultyAtLevelStart = 2; break;
 		}
+		DifficultyForNextLevel = DifficultyAtLevelStart;
 
 		// Try to load the script
 		HashMap<String, bool> DefinedSymbols = {
@@ -437,6 +441,15 @@ shared interface MLLEWeaponApply { bool Apply(uint, se::WeaponHook@ = null, jjST
 				return nextToScript;
 			}
 		}
+#if defined(WITH_LEVEL_PACKS)
+		// A level of a pack has its libraries among the original files of the pack
+		if (_levelHandler != nullptr) {
+			String packFile = LevelPacks::LevelPackLibrary::Get().FindOriginalFile(_levelHandler->GetLevelName(), includePath);
+			if (!packFile.empty() && fs::IsReadableFile(packFile)) {
+				return packFile;
+			}
+		}
+#endif
 		auto sourcePath = ContentResolver::Get().GetSourcePath();
 		return fs::FindPathCaseInsensitive(fs::CombinePath(sourcePath, includePath));
 	}
@@ -777,7 +790,8 @@ shared interface MLLEWeaponApply { bool Apply(uint, se::WeaponHook@ = null, jjST
 							// player until the next tick (trapezes and burgers), the player isn't drawn without a sprite
 							bool replaced = (draw.curFrame != original.curFrame || draw.xOffset != original.xOffset ||
 								draw.yOffset != original.yOffset || draw.xScale != original.xScale || draw.yScale != original.yScale ||
-								draw.angle != original.angle || draw.spriteMode != original.spriteMode || draw.spriteParam != original.spriteParam);
+								draw.angle != original.angle || draw.spriteMode != original.spriteMode || draw.spriteParam != original.spriteParam ||
+								draw.layer != original.layer);
 							p->SetDrawnByScript(!draw.sprite || replaced);
 							if (draw.sprite && replaced && !ContentResolver::Get().IsHeadless()) {
 								std::int32_t cell = 0;
@@ -1114,12 +1128,11 @@ shared interface MLLEWeaponApply { bool Apply(uint, se::WeaponHook@ = null, jjST
 				if ((typeId & (asTYPEID_OBJHANDLE | asTYPEID_APPOBJECT)) == (asTYPEID_OBJHANDLE | asTYPEID_APPOBJECT)) {
 					asITypeInfo* typeInfo = GetEngine()->GetTypeInfoById(typeId);
 					if (typeInfo->GetName() == "jjPLAYER"_s) {
-						// TODO: Detect weapons properly
 						if (auto* killer = runtime_cast<Actors::Player>(collider)) {
 							jjPLAYER* p = GetPlayerBackingStore(killer);
-							ctx->SetArgObject(0, p);
+							ctx->SetArgObject(1, p);
 						} else {
-							ctx->SetArgObject(0, nullptr);
+							ctx->SetArgObject(1, nullptr);
 						}
 					}
 				}
