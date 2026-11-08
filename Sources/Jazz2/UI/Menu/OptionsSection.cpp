@@ -45,7 +45,7 @@ namespace Jazz2::UI::Menu
 		_items.push_back(list->Add<ListItem>(_("User Profile"), [root]() { root->SwitchToSection<UserProfileOptionsSection>(); }, itemHeight));
 #if defined(DEATH_TARGET_ANDROID)
 		_items.push_back(list->Add<ListItem>(_("Choose Game Folder"), []() {
-			Backends::AndroidJniWrap_Activity::chooseSourceDirectory(ContentResolver::Get().GetCachePath());
+			Backends::AndroidJniWrap_Activity::ChooseSourceDirectory(ContentResolver::Get().GetCachePath());
 		}, itemHeight));
 #endif
 		SetContent(Death::move(list));

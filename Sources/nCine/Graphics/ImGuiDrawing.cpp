@@ -228,11 +228,11 @@ namespace nCine
 	void ImGuiDrawing::NewFrame()
 	{
 #if defined(WITH_GLFW)
-		ImGuiGlfwInput::newFrame();
+		ImGuiGlfwInput::NewFrame();
 #elif (defined(WITH_SDL2) || defined(WITH_SDL3))
-		ImGuiSdlInput::newFrame();
+		ImGuiSdlInput::NewFrame();
 #elif defined(DEATH_TARGET_ANDROID)
-		ImGuiAndroidInput::newFrame();
+		ImGuiAndroidInput::NewFrame();
 #endif
 
 #if !defined(IMGUI_HAS_VIEWPORT)
@@ -254,7 +254,7 @@ namespace nCine
 		ImGui::NewFrame();
 
 		// Decide who owns the mouse cursor this frame. The application hides it in fullscreen, and
-		// IInputManager::setCursor() then also forbids ImGui from touching it (ImGuiConfigFlags_NoMouseCursorChange)
+		// IInputManager::SetCursor() then also forbids ImGui from touching it (ImGuiConfigFlags_NoMouseCursorChange)
 		// so the game's choice sticks - but that leaves any ImGui window on screen unusable, with no pointer to aim
 		// with. So ImGui is allowed to drive the cursor whenever it has a window up, and told to want none
 		// (ImGuiMouseCursor_None, which the platform backend turns into a hidden OS cursor) when it does not and the
@@ -263,7 +263,7 @@ namespace nCine
 		// MetricsRenderWindows counts the windows of the last frame, so this follows them appearing and disappearing
 		// on its own; note that a permanently visible overlay panel keeps the cursor visible in fullscreen too.
 		IInputManager& inputManager = theApplication().GetInputManager();
-		const IInputManager::Cursor appCursor = inputManager.cursor();
+		const IInputManager::Cursor appCursor = inputManager.GetCursor();
 		if (appCursor == IInputManager::Cursor::HiddenLocked) {
 			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 		} else {
@@ -280,20 +280,20 @@ namespace nCine
 		ImGui::Render();
 
 #if defined(WITH_GLFW)
-		ImGuiGlfwInput::endFrame();
+		ImGuiGlfwInput::EndFrame();
 #elif (defined(WITH_SDL2) || defined(WITH_SDL3))
-		ImGuiSdlInput::endFrame();
+		ImGuiSdlInput::EndFrame();
 #endif
 
 		ImGuiIO& io = ImGui::GetIO();
 		if (io.WantCaptureKeyboard) {
 			if (_appInputHandler == nullptr) {
-				_appInputHandler = IInputManager::handler();
-				IInputManager::setHandler(nullptr);
+				_appInputHandler = IInputManager::GetHandler();
+				IInputManager::SetHandler(nullptr);
 			}
 		} else {
 			if (_appInputHandler != nullptr) {
-				IInputManager::setHandler(_appInputHandler);
+				IInputManager::SetHandler(_appInputHandler);
 				_appInputHandler = nullptr;
 			}
 		}
@@ -474,11 +474,11 @@ namespace nCine
 			memcpy(indices, imCmdList->IdxBuffer.Data, imCmdList->IdxBuffer.Size * sizeof(std::uint16_t));
 			firstCmd.GetGeometry().ReleaseIndexPointer();
 
-			if (_lastLayerValue != theApplication().GetGuiSettings().imguiLayer) {
+			if (_lastLayerValue != theApplication().GetGuiSettings().ImguiLayer) {
 				// It is enough to set the uniform value once as every ImGui command share the same shader
-				const float depth = RenderCommand::CalculateDepth(theApplication().GetGuiSettings().imguiLayer, -1.0f, 1.0f);
+				const float depth = RenderCommand::CalculateDepth(theApplication().GetGuiSettings().ImguiLayer, -1.0f, 1.0f);
 				firstCmd.GetMaterial().Uniform(Material::DepthUniformName)->SetFloatValue(depth);
-				_lastLayerValue = theApplication().GetGuiSettings().imguiLayer;
+				_lastLayerValue = theApplication().GetGuiSettings().ImguiLayer;
 			}
 
 			for (std::int32_t cmdIdx = 0; cmdIdx < imCmdList->CmdBuffer.Size; cmdIdx++) {
@@ -503,7 +503,7 @@ namespace nCine
 				currCmd.GetGeometry().SetIndexCount(imCmd->ElemCount);
 				currCmd.GetGeometry().SetFirstIndex(imCmd->IdxOffset);
 				currCmd.GetGeometry().SetFirstVertex(imCmd->VtxOffset);
-				currCmd.SetLayer(theApplication().GetGuiSettings().imguiLayer);
+				currCmd.SetLayer(theApplication().GetGuiSettings().ImguiLayer);
 				currCmd.SetVisitOrder(numCmd);
 				currCmd.GetMaterial().SetTexture(reinterpret_cast<RHI::Texture*>(imCmd->GetTexID()));
 
@@ -800,7 +800,7 @@ namespace nCine
 #elif defined(IMGUI_HAS_VIEWPORT) && defined(WITH_RHI_D3D11)
 	// The Direct3D 11 multi-viewport path renders through the ordinary RHI pipeline: one device serves every
 	// window, so a platform window only needs a swap chain of its own that the device can be redirected into
-	// (D3D11Device::BeginSecondaryFrame). No second context, and no backend calls behind the RHI's back.
+	// (D3D11Device::BeginAuxiliaryFrame). No second context, and no backend calls behind the RHI's back.
 	void ImGuiDrawing::PrepareForViewports()
 	{
 		ImGuiIO& io = ImGui::GetIO();
@@ -823,19 +823,21 @@ namespace nCine
 	void ImGuiDrawing::OnCreatePlatformWindow(ImGuiViewport* viewport)
 	{
 		// PlatformHandleRaw is the native handle of the window the platform backend created for this viewport
-		viewport->RendererUserData = RHI::Device::CreateSecondarySwapchain(viewport->PlatformHandleRaw,
+		RHI::AuxiliarySwapchainDesc desc;
+		desc.WindowHandle = viewport->PlatformHandleRaw;
+		viewport->RendererUserData = RHI::Device::CreateAuxiliarySwapchain(Death::move(desc),
 			std::int32_t(viewport->Size.x), std::int32_t(viewport->Size.y));
 	}
 
 	void ImGuiDrawing::OnDestroyPlatformWindow(ImGuiViewport* viewport)
 	{
-		RHI::Device::DestroySecondarySwapchain(viewport->RendererUserData);
+		RHI::Device::DestroyAuxiliarySwapchain(viewport->RendererUserData);
 		viewport->RendererUserData = nullptr;
 	}
 
 	void ImGuiDrawing::OnResizePlatformWindow(ImGuiViewport* viewport, ImVec2 size)
 	{
-		RHI::Device::ResizeSecondarySwapchain(viewport->RendererUserData, std::int32_t(size.x), std::int32_t(size.y));
+		RHI::Device::ResizeAuxiliarySwapchain(viewport->RendererUserData, std::int32_t(size.x), std::int32_t(size.y));
 	}
 
 	void ImGuiDrawing::OnRenderPlatformWindow(ImGuiViewport* viewport, void*)
@@ -846,7 +848,7 @@ namespace nCine
 
 	void ImGuiDrawing::OnSwapPlatformWindowBuffers(ImGuiViewport* viewport, void*)
 	{
-		RHI::Device::PresentSecondaryFrame(viewport->RendererUserData);
+		RHI::Device::PresentAuxiliaryFrame(viewport->RendererUserData);
 	}
 
 	void ImGuiDrawing::DrawPlatformWindow(ImGuiViewport* viewport)
@@ -866,14 +868,14 @@ namespace nCine
 		// device back to the main window. The swap chain is presented afterwards, from Renderer_SwapBuffers -
 		// ImGui renders every platform window first and only then swaps them all.
 		const Recti previousViewport = RHI::Device::GetViewport();
-		RHI::Device::BeginSecondaryFrame(viewport->RendererUserData, (viewport->Flags & ImGuiViewportFlags_NoRendererClear) == 0);
+		RHI::Device::BeginAuxiliaryFrame(viewport->RendererUserData, (viewport->Flags & ImGuiViewportFlags_NoRendererClear) == 0);
 		RHI::Device::SetViewport(Recti(0, 0, fbWidth, fbHeight));
 
 		// The shared buffers are enough here: this backend executes each draw as it is issued, so the next window
 		// overwriting them cannot affect the draws already made
 		DrawData(drawData, _vbo.get(), _ibo.get());
 
-		RHI::Device::EndSecondaryFrame();
+		RHI::Device::EndAuxiliaryFrame();
 		RHI::Device::SetViewport(previousViewport);
 	}
 #elif defined(IMGUI_HAS_VIEWPORT) && (defined(WITH_RHI_VULKAN) || defined(WITH_RHI_METAL)) && (defined(WITH_SDL2) || defined(WITH_SDL3))
@@ -925,7 +927,9 @@ namespace nCine
 		data->Ibo = std::make_unique<RHI::Buffer>(BufferTarget::Index);
 		// The surface / layer is created from the SDL window itself (SDL only allows that on a Vulkan resp. Metal
 		// window, which the platform backend creates because the RHI is Vulkan resp. Metal)
-		data->Swapchain = RHI::Device::CreateSecondarySwapchain(ImGuiSdlInput::getPlatformWindowHandle(viewport),
+		RHI::AuxiliarySwapchainDesc desc;
+		desc.WindowHandle = ImGuiSdlInput::GetPlatformWindowHandle(viewport);
+		data->Swapchain = RHI::Device::CreateAuxiliarySwapchain(Death::move(desc),
 			std::int32_t(viewport->Size.x), std::int32_t(viewport->Size.y));
 		viewport->RendererUserData = data;
 	}
@@ -933,7 +937,7 @@ namespace nCine
 	void ImGuiDrawing::OnDestroyPlatformWindow(ImGuiViewport* viewport)
 	{
 		if (PlatformWindowData* data = static_cast<PlatformWindowData*>(viewport->RendererUserData)) {
-			RHI::Device::DestroySecondarySwapchain(data->Swapchain);
+			RHI::Device::DestroyAuxiliarySwapchain(data->Swapchain);
 			delete data;	// releases the render target and the texture behind it
 		}
 		viewport->RendererUserData = nullptr;
@@ -942,7 +946,7 @@ namespace nCine
 	void ImGuiDrawing::OnResizePlatformWindow(ImGuiViewport* viewport, ImVec2 size)
 	{
 		if (PlatformWindowData* data = static_cast<PlatformWindowData*>(viewport->RendererUserData)) {
-			RHI::Device::ResizeSecondarySwapchain(data->Swapchain, std::int32_t(size.x), std::int32_t(size.y));
+			RHI::Device::ResizeAuxiliarySwapchain(data->Swapchain, std::int32_t(size.x), std::int32_t(size.y));
 		}
 	}
 
@@ -993,7 +997,7 @@ namespace nCine
 		RHI::Device::SetViewport(previousViewport);
 
 		// Hand the rendered texture over for this frame; the device presents it with the main window
-		RHI::Device::QueueSecondaryPresent(data->Swapchain, data->Target.get());
+		RHI::Device::PresentAuxiliaryTexture(data->Swapchain, data->Target.get());
 	}
 #endif
 }

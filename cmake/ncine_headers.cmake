@@ -117,6 +117,8 @@ list(APPEND HEADERS
 	${NCINE_SOURCE_DIR}/nCine/Graphics/Geometry.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/IDebugOverlay.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/IGfxDevice.h
+	${NCINE_SOURCE_DIR}/nCine/Graphics/AuxiliaryWindow.h
+	${NCINE_SOURCE_DIR}/nCine/Graphics/AuxiliaryWindowPresenter.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/ITextureLoader.h
 	#${NCINE_SOURCE_DIR}/nCine/Graphics/ITextureSaver.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/Material.h
@@ -152,6 +154,7 @@ list(APPEND HEADERS
 	${NCINE_SOURCE_DIR}/nCine/Graphics/Viewport.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/IRhiCapabilities.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/Rhi.h
+	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/RhiAuxiliarySwapchain.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/RhiCapabilitiesBase.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/RhiFwd.h
 	${NCINE_SOURCE_DIR}/nCine/Graphics/RHI/RhiTypes.h

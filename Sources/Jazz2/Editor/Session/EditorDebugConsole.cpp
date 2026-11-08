@@ -22,10 +22,13 @@
 #include "../Shell/TileSetsDialog.h"
 #include "../Smart/TilePrefabs.h"
 #include "../Tools/EditorTool.h"
-#include "../UI/UiKeyboard.h"
-#include "../UI/UiRadialMenu.h"
-#include "../UI/UiSurface.h"
-#include "../UI/UiTheme.h"
+#include "../../UI/Windows/Keyboard.h"
+#include "../../UI/Windows/RadialMenu.h"
+#include "../../UI/Windows/Skin.h"
+#include "../../UI/Windows/Surface.h"
+#include "../../UI/Windows/Theme.h"
+#include "../../UI/Windows/VectorArt.h"
+#include "../UI/EditorUi.h"
 #include "../../ContentResolver.h"
 #include "../../LevelHandler.h"
 #include "../../PreferencesCache.h"
@@ -112,9 +115,9 @@ namespace Jazz2::Editor
 	void EditorDebugConsole::ReadStartupCommands()
 	{
 		const AppConfiguration& config = theApplication().GetAppConfiguration();
-		for (std::int32_t i = 0; i + 1 < config.argc(); i++) {
-			if (config.argv(i) == "/console"_s) {
-				_startupCommands.emplace_back(config.argv(i + 1));
+		for (std::int32_t i = 0; i + 1 < config.GetArgc(); i++) {
+			if (config.GetArgv(i) == "/console"_s) {
+				_startupCommands.emplace_back(config.GetArgv(i + 1));
 				i++;
 			}
 		}
@@ -617,6 +620,209 @@ namespace Jazz2::Editor
 			auto s = fs::Open(args[2], FileAccess::Write);
 			return QuietResult(s->IsValid() && PngCodec::Encode(*s, image));
 		} });
+		commands.push_back({ "/iconsheet"_s, 1, "/iconsheet <image.png> [scale] [art.txt]"_s, [](const Args& args) {
+			// Every icon as the interface draws it at a scale over the background of a panel, or with a file of
+			// "Name = vector art" lines (and "//" comments), each icon named as it's drawn now next to the art of the file
+			static const struct {
+				StringView Name;
+				EditorIcon Icon;
+			} IconNames[] = {
+				{ "None"_s, EditorIcon::None },
+				{ "Close"_s, EditorIcon::Close },
+				{ "CloseSmall"_s, EditorIcon::CloseSmall },
+				{ "Check"_s, EditorIcon::Check },
+				{ "ChevronLeft"_s, EditorIcon::ChevronLeft },
+				{ "ChevronRight"_s, EditorIcon::ChevronRight },
+				{ "ChevronDown"_s, EditorIcon::ChevronDown },
+				{ "ArrowUp"_s, EditorIcon::ArrowUp },
+				{ "ArrowDown"_s, EditorIcon::ArrowDown },
+				{ "Up"_s, EditorIcon::Up },
+				{ "Plus"_s, EditorIcon::Plus },
+				{ "Minus"_s, EditorIcon::Minus },
+				{ "Folder"_s, EditorIcon::Folder },
+				{ "File"_s, EditorIcon::File },
+				{ "Delete"_s, EditorIcon::Delete },
+				{ "Search"_s, EditorIcon::Search },
+				{ "Info"_s, EditorIcon::Info },
+				{ "Warning"_s, EditorIcon::Warning },
+				{ "Undock"_s, EditorIcon::Undock },
+				{ "Dock"_s, EditorIcon::Dock },
+				{ "CursorResizeHorizontal"_s, EditorIcon::CursorResizeHorizontal },
+				{ "CursorResizeVertical"_s, EditorIcon::CursorResizeVertical },
+				{ "CursorResizeNWSE"_s, EditorIcon::CursorResizeNWSE },
+				{ "CursorResizeNESW"_s, EditorIcon::CursorResizeNESW },
+				{ "CursorMove"_s, EditorIcon::CursorMove },
+				{ "Brush"_s, EditorIcon::Brush },
+				{ "Eraser"_s, EditorIcon::Eraser },
+				{ "Rectangle"_s, EditorIcon::Rectangle },
+				{ "Fill"_s, EditorIcon::Fill },
+				{ "Eyedropper"_s, EditorIcon::Eyedropper },
+				{ "Select"_s, EditorIcon::Select },
+				{ "Wand"_s, EditorIcon::Wand },
+				{ "Hand"_s, EditorIcon::Hand },
+				{ "Undo"_s, EditorIcon::Undo },
+				{ "Redo"_s, EditorIcon::Redo },
+				{ "Grid"_s, EditorIcon::Grid },
+				{ "Eye"_s, EditorIcon::Eye },
+				{ "EyeClosed"_s, EditorIcon::EyeClosed },
+				{ "Lock"_s, EditorIcon::Lock },
+				{ "Unlock"_s, EditorIcon::Unlock },
+				{ "Layers"_s, EditorIcon::Layers },
+				{ "Save"_s, EditorIcon::Save },
+				{ "New"_s, EditorIcon::New },
+				{ "Play"_s, EditorIcon::Play },
+				{ "Stop"_s, EditorIcon::Stop },
+				{ "ZoomIn"_s, EditorIcon::ZoomIn },
+				{ "ZoomOut"_s, EditorIcon::ZoomOut },
+				{ "Fit"_s, EditorIcon::Fit },
+				{ "FlipX"_s, EditorIcon::FlipX },
+				{ "FlipY"_s, EditorIcon::FlipY },
+				{ "Copy"_s, EditorIcon::Copy },
+				{ "Paste"_s, EditorIcon::Paste },
+				{ "Cut"_s, EditorIcon::Cut },
+				{ "Settings"_s, EditorIcon::Settings },
+				{ "Parallax"_s, EditorIcon::Parallax },
+				{ "Tiles"_s, EditorIcon::Tiles },
+				{ "Export"_s, EditorIcon::Export },
+				{ "Event"_s, EditorIcon::Event },
+				{ "Mask"_s, EditorIcon::Mask },
+				{ "Pause"_s, EditorIcon::Pause },
+				{ "Path"_s, EditorIcon::Path },
+				{ "Measure"_s, EditorIcon::Measure },
+				{ "Reach"_s, EditorIcon::Reach },
+				{ "SmartBrush"_s, EditorIcon::SmartBrush },
+				{ "Slope"_s, EditorIcon::Slope },
+				{ "Usage"_s, EditorIcon::Usage },
+				{ "EventPath"_s, EditorIcon::EventPath },
+				{ "Map"_s, EditorIcon::Map },
+				{ "RotateCW"_s, EditorIcon::RotateCW },
+				{ "RotateCCW"_s, EditorIcon::RotateCCW },
+				{ "Dice"_s, EditorIcon::Dice },
+				{ "Shuffle"_s, EditorIcon::Shuffle },
+				{ "RandomFlipX"_s, EditorIcon::RandomFlipX },
+				{ "RandomFlipY"_s, EditorIcon::RandomFlipY },
+				{ "ShapeLine"_s, EditorIcon::ShapeLine },
+				{ "Ellipse"_s, EditorIcon::Ellipse },
+				{ "FilledEllipse"_s, EditorIcon::FilledEllipse },
+				{ "More"_s, EditorIcon::More },
+				{ "Debug"_s, EditorIcon::Debug },
+				{ "EnterEditor"_s, EditorIcon::EnterEditor },
+				{ "Shapes"_s, EditorIcon::Shapes },
+				{ "History"_s, EditorIcon::History },
+				{ "Properties"_s, EditorIcon::Properties },
+				{ "EyeOff"_s, EditorIcon::EyeOff },
+				{ "PlayOutline"_s, EditorIcon::PlayOutline },
+				{ "Passthrough"_s, EditorIcon::Passthrough },
+				{ "OverriddenAssets"_s, EditorIcon::OverriddenAssets },
+				{ "InvertSelection"_s, EditorIcon::InvertSelection },
+				{ "ScreenFrame"_s, EditorIcon::ScreenFrame },
+				{ "GrabBlock"_s, EditorIcon::GrabBlock },
+				{ "PauseLayers"_s, EditorIcon::PauseLayers },
+				{ "Import"_s, EditorIcon::Import },
+				{ "Recovery"_s, EditorIcon::Recovery },
+				{ "CommandPalette"_s, EditorIcon::CommandPalette },
+				{ "RaceFlag"_s, EditorIcon::RaceFlag },
+				{ "LightBulb"_s, EditorIcon::LightBulb },
+				{ "EventsOnTop"_s, EditorIcon::EventsOnTop },
+				{ "Weapon"_s, EditorIcon::Weapon },
+				{ "Pencil"_s, EditorIcon::Pencil },
+				{ "LevelFile"_s, EditorIcon::LevelFile },
+				{ "ScriptedLevelFile"_s, EditorIcon::ScriptedLevelFile },
+				{ "BrokenFile"_s, EditorIcon::BrokenFile },
+				{ "TileSetFile"_s, EditorIcon::TileSetFile },
+				{ "MusicFile"_s, EditorIcon::MusicFile },
+				{ "TrueColorTileSetFile"_s, EditorIcon::TrueColorTileSetFile },
+			};
+
+			float scale = std::clamp(args.size() >= 3 ? args.Float(2, 1.0f) : 1.0f, 0.5f, 8.0f);
+			std::int32_t size = std::max<std::int32_t>(8, std::int32_t(std::round(Theme::IconSize * scale)));
+			std::int32_t gap = std::max<std::int32_t>(2, size / 4);
+			SmallVector<IconArt, 0> cells;
+			SmallVector<String, 0> arts;
+			if (args.size() >= 4) {
+				auto file = fs::Open(args[3], FileAccess::Read);
+				if (file == nullptr || !file->IsValid() || file->GetSize() <= 0) {
+					return DebugResult::Failed;
+				}
+				String text{NoInit, std::size_t(file->GetSize())};
+				file->Read(text.data(), std::int64_t(text.size()));
+				for (StringView line : text.split('\n')) {
+					line = line.trimmed();
+					StringView found = line.find('=');
+					if (line.empty() || line.hasPrefix("//"_s) || found.data() == nullptr) {
+						continue;
+					}
+					std::size_t separator = std::size_t(found.data() - line.data());
+					StringView name = line.prefix(separator).trimmed();
+					StringView art = line.exceptPrefix(separator + 1).trimmed();
+					EditorIcon icon = EditorIcon::None;
+					for (const auto& entry : IconNames) {
+						if (entry.Name == name) {
+							icon = entry.Icon;
+							break;
+						}
+					}
+					if (icon == EditorIcon::None) {
+						LOGW("/iconsheet: no icon is named \"{}\"", name);
+					}
+					if (!VectorArt::IsValid(art, Icons::GetPixelColor)) {
+						LOGW("/iconsheet: the art of \"{}\" can't be read", name);
+					}
+					arts.push_back(String(art));
+				}
+				// Each icon as it's drawn now, then the art of the file
+				std::size_t index = 0;
+				for (StringView line : text.split('\n')) {
+					line = line.trimmed();
+					StringView found = line.find('=');
+					if (line.empty() || line.hasPrefix("//"_s) || found.data() == nullptr) {
+						continue;
+					}
+					std::size_t separator = std::size_t(found.data() - line.data());
+					StringView name = line.prefix(separator).trimmed();
+					IconArt now;
+					for (const auto& entry : IconNames) {
+						if (entry.Name == name) {
+							now = Icons::GetArt(Icons::GetIndex(entry.Icon));
+							break;
+						}
+					}
+					IconArt next;
+					next.Vector = arts[index++].data();
+					cells.push_back(now);
+					cells.push_back(next);
+				}
+			} else {
+				for (std::int32_t i = 0; i < Icons::GetCount(); i++) {
+					cells.push_back(Icons::GetArt(i));
+				}
+			}
+
+			std::int32_t count = std::int32_t(cells.size());
+			constexpr std::int32_t Columns = 16;
+			std::int32_t rows = (count + Columns - 1) / Columns;
+			std::int32_t width = gap + Columns * (size + gap), height = gap + rows * (size + gap);
+			SmallVector<std::uint8_t, 0> icons;
+			icons.assign(std::size_t(width) * std::size_t(height) * 4, 0);
+			for (std::int32_t i = 0; i < count; i++) {
+				std::int32_t x = gap + (i % Columns) * (size + gap), y = gap + (i / Columns) * (size + gap);
+				Skin::DrawIcon(cells[i], size, &icons[(std::size_t(y) * std::size_t(width) + std::size_t(x)) * 4], width * 4);
+			}
+			PngImage image;
+			image.Create(width, height, false);
+			const Colorf& back = Theme::PanelFill;
+			for (std::size_t i = 0; i < std::size_t(width) * std::size_t(height); i++) {
+				const std::uint8_t* src = &icons[i * 4];
+				float a = float(src[3]) / 255.0f;
+				std::uint8_t* dst = &image.Pixels[i * 4];
+				dst[0] = std::uint8_t((float(src[0]) / 255.0f * a + back.R * (1.0f - a)) * 255.0f + 0.5f);
+				dst[1] = std::uint8_t((float(src[1]) / 255.0f * a + back.G * (1.0f - a)) * 255.0f + 0.5f);
+				dst[2] = std::uint8_t((float(src[2]) / 255.0f * a + back.B * (1.0f - a)) * 255.0f + 0.5f);
+				dst[3] = 255;
+			}
+			auto s = fs::Open(args[1], FileAccess::Write);
+			return QuietResult(s->IsValid() && PngCodec::Encode(*s, image));
+		} });
 	}
 
 	void EditorDebugConsole::AddPlayTestCommands(SmallVectorImpl<Command>& commands)
@@ -713,9 +919,9 @@ namespace Jazz2::Editor
 				pos = Vector2f(pos.X * size.X, pos.Y * size.Y);
 			}
 			MouseEvent event;
-			event.x = std::int32_t(pos.X);
-			event.y = std::int32_t(pos.Y);
-			event.button = (args.Verb == "/rclick"_s ? MouseButton::Right : MouseButton::Left);
+			event.X = std::int32_t(pos.X);
+			event.Y = std::int32_t(pos.Y);
+			event.Button = (args.Verb == "/rclick"_s ? MouseButton::Right : MouseButton::Left);
 			_session.OnMouseDown(event);
 			_session.OnMouseUp(event);
 			return DebugResult::Done;
@@ -726,32 +932,34 @@ namespace Jazz2::Editor
 			Vector2f from(args.Float(1, 0.0f), args.Float(2, 0.0f));
 			Vector2f to(args.Float(3, 0.0f), args.Float(4, 0.0f));
 			MouseEvent event;
-			event.button = MouseButton::Left;
-			event.x = std::int32_t(from.X);
-			event.y = std::int32_t(from.Y);
+			event.Button = MouseButton::Left;
+			event.X = std::int32_t(from.X);
+			event.Y = std::int32_t(from.Y);
 			_session.OnMouseDown(event);
 			struct DebugMouseState : MouseState {
-				bool isButtonDown(MouseButton button) const override { return button == MouseButton::Left; }
+				bool IsButtonDown(MouseButton button) const override { return button == MouseButton::Left; }
 			} state;
 			constexpr std::int32_t Steps = 16;
 			for (std::int32_t i = 1; i <= Steps; i++) {
-				state.x = std::int32_t(from.X + (to.X - from.X) * i / Steps);
-				state.y = std::int32_t(from.Y + (to.Y - from.Y) * i / Steps);
+				state.X = std::int32_t(from.X + (to.X - from.X) * i / Steps);
+				state.Y = std::int32_t(from.Y + (to.Y - from.Y) * i / Steps);
 				_session.OnMouseMove(state);
 			}
-			event.x = std::int32_t(to.X);
-			event.y = std::int32_t(to.Y);
+			event.X = std::int32_t(to.X);
+			event.Y = std::int32_t(to.Y);
 			_session.OnMouseUp(event);
 			return DebugResult::Done;
 		} });
 		auto pressOrRelease = [this](const Args& args) {
 			// A drag over several frames, with /move between, so what animates while it's held can be seen
 			MouseEvent event;
-			event.button = MouseButton::Left;
-			event.x = std::int32_t(args.Float(1, 0.0f));
-			event.y = std::int32_t(args.Float(2, 0.0f));
+			event.Button = MouseButton::Left;
+			event.X = std::int32_t(args.Float(1, 0.0f));
+			event.Y = std::int32_t(args.Float(2, 0.0f));
 			if (args.Verb == "/press"_s) {
 				_session.OnMouseDown(event);
+				// Held over frames while the mouse of the system isn't, see EditorInputRouter::Update()
+				_input.ForgetHeldButtons();
 			} else {
 				_session.OnMouseUp(event);
 			}
@@ -761,33 +969,33 @@ namespace Jazz2::Editor
 		commands.push_back({ "/release"_s, 2, "/release <x> <y>"_s, pressOrRelease });
 		commands.push_back({ "/move"_s, 2, "/move <x> <y>"_s, [this](const Args& args) {
 			struct DebugMouseState : MouseState {
-				bool isButtonDown(MouseButton button) const override { return button == MouseButton::Left; }
+				bool IsButtonDown(MouseButton button) const override { return button == MouseButton::Left; }
 			} state;
-			state.x = std::int32_t(args.Float(1, 0.0f));
-			state.y = std::int32_t(args.Float(2, 0.0f));
+			state.X = std::int32_t(args.Float(1, 0.0f));
+			state.Y = std::int32_t(args.Float(2, 0.0f));
 			_session.OnMouseMove(state);
 			return DebugResult::Done;
 		} });
 		commands.push_back({ "/hover"_s, 2, "/hover <x> <y>"_s, [this](const Args& args) {
 			struct DebugMouseState : MouseState {
-				bool isButtonDown(MouseButton button) const override { return false; }
+				bool IsButtonDown(MouseButton button) const override { return false; }
 			} state;
-			state.x = std::int32_t(args.Float(1, 0.0f));
-			state.y = std::int32_t(args.Float(2, 0.0f));
+			state.X = std::int32_t(args.Float(1, 0.0f));
+			state.Y = std::int32_t(args.Float(2, 0.0f));
 			_session.OnMouseMove(state);
 			return DebugResult::Done;
 		} });
 		commands.push_back({ "/wheel"_s, 3, "/wheel <x> <y> <delta>"_s, [this](const Args& args) {
 			// Scrolls at a position, as the mouse would
 			struct DebugMouseState : MouseState {
-				bool isButtonDown(MouseButton button) const override { return false; }
+				bool IsButtonDown(MouseButton button) const override { return false; }
 			} state;
-			state.x = std::int32_t(args.Float(1, 0.0f));
-			state.y = std::int32_t(args.Float(2, 0.0f));
+			state.X = std::int32_t(args.Float(1, 0.0f));
+			state.Y = std::int32_t(args.Float(2, 0.0f));
 			_session.OnMouseMove(state);
 			ScrollEvent event;
-			event.x = 0.0f;
-			event.y = args.Float(3, 0.0f);
+			event.X = 0.0f;
+			event.Y = args.Float(3, 0.0f);
 			_session.OnMouseWheel(event);
 			return DebugResult::Done;
 		} });
@@ -800,23 +1008,23 @@ namespace Jazz2::Editor
 				{ "left", Keys::Left }, { "right", Keys::Right }, { "up", Keys::Up }, { "down", Keys::Down },
 				{ "space", Keys::Space }, { "ctrl", Keys::LCtrl }, { "shift", Keys::LShift }, { "alt", Keys::LAlt },
 			};
-			event.sym = Keys::Unknown;
+			event.Sym = Keys::Unknown;
 			for (const KeyName& name : KeyNames) {
 				if (key == StringView(name.Name)) {
-					event.sym = name.Key;
+					event.Sym = name.Key;
 				}
 			}
 			// A letter for itself, as B grabbing a block or M held showing the masks
 			if (key.size() == 1 && key[0] >= 'a' && key[0] <= 'z') {
-				event.sym = Keys(std::int32_t(Keys::A) + (key[0] - 'a'));
+				event.Sym = Keys(std::int32_t(Keys::A) + (key[0] - 'a'));
 			}
-			if (event.sym == Keys::Unknown) {
+			if (event.Sym == Keys::Unknown) {
 				return DebugResult::Failed;
 			}
 			// The modifier keys held, as a real key event has them
 			std::int32_t modifiers = _input.GetModifiers();
-			std::int32_t modifier = (event.sym == Keys::LCtrl ? KeyMod::Ctrl : (event.sym == Keys::LShift ? KeyMod::Shift : (event.sym == Keys::LAlt ? KeyMod::Alt : 0)));
-			event.mod = (args.Verb == "/keyup"_s ? (modifiers & ~modifier) : (modifiers | modifier));
+			std::int32_t modifier = (event.Sym == Keys::LCtrl ? KeyMod::Ctrl : (event.Sym == Keys::LShift ? KeyMod::Shift : (event.Sym == Keys::LAlt ? KeyMod::Alt : 0)));
+			event.Mod = (args.Verb == "/keyup"_s ? (modifiers & ~modifier) : (modifiers | modifier));
 			if (args.Verb != "/keyup"_s) {
 				_session.OnKeyPressed(event);
 			}
@@ -832,8 +1040,8 @@ namespace Jazz2::Editor
 			// Typed into what has the focus character by character, as the keyboard does
 			for (char c : args[1]) {
 				TextInputEvent event;
-				event.text[0] = (c == '+' ? ' ' : c);
-				event.length = 1;
+				event.Text[0] = (c == '+' ? ' ' : c);
+				event.Length = 1;
 				_session.OnTextInput(event);
 			}
 			return DebugResult::Done;
@@ -842,17 +1050,17 @@ namespace Jazz2::Editor
 			// In pixels of the screen, the index of the finger that came or went is the last one given
 			TouchEvent event;
 			StringView type = args[1];
-			event.type = (type == "down"_s ? TouchEventType::Down : type == "pointerdown"_s ? TouchEventType::PointerDown :
+			event.Type = (type == "down"_s ? TouchEventType::Down : type == "pointerdown"_s ? TouchEventType::PointerDown :
 				type == "pointerup"_s ? TouchEventType::PointerUp : type == "up"_s ? TouchEventType::Up : TouchEventType::Move);
 			Vector2f screen = _session.GetSurface()->GetScreenSize();
-			for (std::size_t i = 2; i + 2 < args.size() + 0 && event.count < TouchEvent::MaxPointers; i += 3) {
-				TouchEvent::Pointer& pointer = event.pointers[event.count++];
-				pointer.id = std::int32_t(args.Float(i, 0.0f));
-				pointer.x = args.Float(i + 1, 0.0f) / screen.X;
-				pointer.y = args.Float(i + 2, 0.0f) / screen.Y;
-				pointer.pressure = 1.0f;
+			for (std::size_t i = 2; i + 2 < args.size() + 0 && event.Count < TouchEvent::MaxPointers; i += 3) {
+				TouchEvent::Pointer& pointer = event.Pointers[event.Count++];
+				pointer.Id = std::int32_t(args.Float(i, 0.0f));
+				pointer.X = args.Float(i + 1, 0.0f) / screen.X;
+				pointer.Y = args.Float(i + 2, 0.0f) / screen.Y;
+				pointer.Pressure = 1.0f;
 			}
-			event.actionIndex = std::int32_t(event.count) - 1;
+			event.ActionIndex = std::int32_t(event.Count) - 1;
 			_session.OnTouchEvent(event);
 			return DebugResult::Done;
 		} });
@@ -874,7 +1082,7 @@ namespace Jazz2::Editor
 		} });
 		commands.push_back({ "/focus"_s, 0, "/focus [back]"_s, [this](const Args& args) {
 			// Moves the keyboard focus as Tab does, "/focus back" as Shift+Tab
-			UiSurface* surface = _session.GetSurface();
+			Surface* surface = _session.GetSurface();
 			if (surface == nullptr) {
 				return DebugResult::Failed;
 			}
@@ -882,18 +1090,18 @@ namespace Jazz2::Editor
 		} });
 		commands.push_back({ "/keyboard"_s, 0, "/keyboard"_s, [this](const Args&) {
 			// The keyboard of the editor, as where the system has none
-			UiOnScreenKeyboard::Show(*_session.GetSurface());
+			OnScreenKeyboard::Show(*_session.GetSurface());
 			return DebugResult::Done;
 		} });
 		commands.push_back({ "/theme"_s, 1, "/theme default|contrast [still] [readable]"_s, [](const Args& args) {
 			// Not saved
-			UiThemeKind kind = (args[1] == "contrast"_s ? UiThemeKind::HighContrast : UiThemeKind::Default);
+			ThemeKind kind = (args[1] == "contrast"_s ? ThemeKind::HighContrast : ThemeKind::Default);
 			bool reducedMotion = false, readableFont = false;
 			for (std::size_t i = 2; i < args.size(); i++) {
 				reducedMotion |= (args[i] == "still"_s);
 				readableFont |= (args[i] == "readable"_s);
 			}
-			UiTheme::Apply(kind, reducedMotion, readableFont);
+			Theme::Apply(kind, reducedMotion, readableFont);
 			return DebugResult::Done;
 		} });
 		commands.push_back({ "/safearea"_s, 4, "/safearea <left> <top> <right> <bottom>, in percent"_s, [](const Args& args) {
@@ -938,18 +1146,18 @@ namespace Jazz2::Editor
 			std::memcpy(palette, ContentResolver::Get().GetPalettes().data(), sizeof(palette));
 			std::uint32_t rgb = std::uint32_t(std::strtoul(String(args[2]).data(), nullptr, 16));
 			palette[entry] = ((rgb >> 16) & 0xFF) | (rgb & 0xFF00) | ((rgb & 0xFF) << 16) | 0xFF000000u;
-			TimeStamp start = TimeStamp::now();
+			TimeStamp start = TimeStamp::Now();
 			// TRANSLATORS: Name of an undo step in the history, after the palette of the level was changed
 			_session.Execute(std::make_unique<SetLevelPaletteCommand>(_session.GetDocument(), true, palette, _x("editor", "Palette")));
-			LOGI("Palette entry {} changed in {:.2f} ms", entry, start.millisecondsSince());
+			LOGI("Palette entry {} changed in {:.2f} ms", entry, start.GetMillisecondsSince());
 			return DebugResult::Done;
 		} });
 		commands.push_back({ "/palettemove"_s, 3, "/palettemove <first> <last> <-1|1> [keep]"_s, [this](const Args& args) {
 			// Entries of the palette moved, with the pixels of the tiles
-			TimeStamp start = TimeStamp::now();
+			TimeStamp start = TimeStamp::Now();
 			bool moved = MovePaletteEntries(_session, std::int32_t(args.Float(1, 0.0f)), std::int32_t(args.Float(2, 0.0f)), std::int32_t(args.Float(3, 0.0f)),
 				args.size() >= 5 && args[4] == "keep"_s);
-			LOGI("Palette entries moved in {:.2f} ms", start.millisecondsSince());
+			LOGI("Palette entries moved in {:.2f} ms", start.GetMillisecondsSince());
 			return QuietResult(moved);
 		} });
 		commands.push_back({ "/tileoverride"_s, 2, "/tileoverride <tile ID> <palette index>"_s, [this](const Args& args) {

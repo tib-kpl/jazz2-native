@@ -54,7 +54,7 @@ namespace Jazz2::UI::Menu
 		// TRANSLATORS: Menu item in Options > Graphics section
 		list->Add<ChoiceItem>(_("Screen Resolution"),
 			[this]() -> StringView {
-				Vector2i res = theApplication().GetGfxDevice().drawableResolution();
+				Vector2i res = theApplication().GetGfxDevice().GetDrawableResolution();
 				_resolutionValue = format("{}x{}", res.X, res.Y);
 				return _resolutionValue;
 			},
@@ -124,7 +124,7 @@ namespace Jazz2::UI::Menu
 				[]() -> StringView { return (PreferencesCache::EnableFullscreen ? _("Enabled") : _("Disabled")); },
 				[this](std::int32_t) {
 					PreferencesCache::EnableFullscreen = !PreferencesCache::EnableFullscreen;
-					theApplication().GetGfxDevice().setResolution(PreferencesCache::EnableFullscreen);
+					theApplication().GetGfxDevice().SetResolution(PreferencesCache::EnableFullscreen);
 					// The cursor follows the policy of the state handler, as when it's toggled by a key (see Main.cpp)
 					_root->ApplyCursorPolicy();
 					_isDirty = true;
@@ -173,7 +173,7 @@ namespace Jazz2::UI::Menu
 				// Disabled, then each scope wider than the one before, clamped at the ends - a press goes around
 				constexpr std::int32_t Count = (std::int32_t)DitheringScope::Screen + 1;
 				std::int32_t index = (std::int32_t)PreferencesCache::Dithering;
-				index = (direction == 0 ? (index + 1) % Count : std::clamp(index + (direction < 0 ? -1 : 1), 0, Count - 1));
+				index = (direction == 0 ? (index + 1) % Count : std::clamp<std::int32_t>(index + (direction < 0 ? -1 : 1), 0, Count - 1));
 				PreferencesCache::Dithering = (DitheringScope)index;
 				_root->ApplyPreferencesChanges(ChangedPreferencesType::Graphics);
 				_isDirty = true;

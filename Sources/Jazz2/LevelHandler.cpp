@@ -232,14 +232,14 @@ namespace Jazz2
 
 		// Remove nodes from UpscaleRenderPass
 		for (auto& viewport : _assignedViewports) {
-			viewport->_combineRenderer->setParent(nullptr);
+			viewport->_combineRenderer->SetParent(nullptr);
 		}
 		// Not created if the level failed to load
 		if (_hud != nullptr) {
-			_hud->setParent(nullptr);
+			_hud->SetParent(nullptr);
 		}
 		if (_console != nullptr) {
-			_console->setParent(nullptr);
+			_console->SetParent(nullptr);
 		}
 #if defined(WITH_EDITOR)
 		if (_playTestDebug != nullptr) {
@@ -299,7 +299,7 @@ namespace Jazz2
 #endif
 
 		_rootNode = CreateRootNode();
-		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
+		_rootNode->SetVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
 
@@ -361,7 +361,7 @@ namespace Jazz2
 #endif
 
 		_rootNode = CreateRootNode();
-		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
+		_rootNode->SetVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
 
@@ -463,9 +463,9 @@ namespace Jazz2
 #if defined(DEATH_DEBUG)
 		// Run on the first frame, once the viewports exist (see OnBeginFrame())
 		const AppConfiguration& config = theApplication().GetAppConfiguration();
-		for (std::int32_t i = 0; i + 1 < config.argc(); i++) {
-			if (config.argv(i) == "/console"_s) {
-				_debugStartupCommands.emplace_back(config.argv(i + 1));
+		for (std::int32_t i = 0; i + 1 < config.GetArgc(); i++) {
+			if (config.GetArgv(i) == "/console"_s) {
+				_debugStartupCommands.emplace_back(config.GetArgv(i + 1));
 				i++;
 			}
 		}
@@ -765,9 +765,9 @@ namespace Jazz2
 		if (IsSandbox()) {
 			// Nothing of it is shown
 		} else if (!_levelDisplayName.empty()) {
-			theApplication().GetGfxDevice().setWindowTitle(String(NCINE_APP_NAME " - " + _levelDisplayName));
+			theApplication().GetGfxDevice().SetWindowTitle(String(NCINE_APP_NAME " - " + _levelDisplayName));
 		} else {
-			theApplication().GetGfxDevice().setWindowTitle(NCINE_APP_NAME);
+			theApplication().GetGfxDevice().SetWindowTitle(NCINE_APP_NAME);
 		}
 
 		_defaultNextLevel = Death::move(descriptor.NextLevel);
@@ -775,7 +775,7 @@ namespace Jazz2
 
 		_tileMap = Death::move(descriptor.TileMap);
 		_tileMap->SetOwner(this);
-		_tileMap->setParent(_rootNode.get());
+		_tileMap->SetParent(_rootNode.get());
 
 		_eventMap = Death::move(descriptor.EventMap);
 		_eventMap->SetLevelHandler(this);
@@ -1234,7 +1234,7 @@ namespace Jazz2
 		auto& resolver = ContentResolver::Get();
 		if (resolver.IsHeadless()) {
 			// Use only the main viewport in headless mode
-			_rootNode->setParent(&theApplication().GetRootNode());
+			_rootNode->SetParent(&theApplication().GetRootNode());
 			return;
 		}
 
@@ -1259,9 +1259,9 @@ namespace Jazz2
 			// and is rasterized into the (supersampled) scene buffer at an integer scale
 			_hudUpscalePass.Initialize(w, h, w, h, 1, true);
 			// Composite the overlay into the scene buffer (on top of the player viewports) instead of to the screen
-			_hudUpscalePass.setParent(_upscalePass.GetNode());
+			_hudUpscalePass.SetParent(_upscalePass.GetNode());
 		} else {
-			_hudUpscalePass.setParent(nullptr);
+			_hudUpscalePass.SetParent(nullptr);
 		}
 
 #if defined(RHI_CAP_SHADERS) && defined(RHI_CAP_FRAMEBUFFERS)
@@ -1302,10 +1302,10 @@ namespace Jazz2
 		// toggled on or off when the player count changes)
 		SceneNode* hudParent = GetHudParentNode();
 		if (_hud != nullptr) {
-			_hud->setParent(hudParent);
+			_hud->SetParent(hudParent);
 		}
 		if (_console != nullptr) {
-			_console->setParent(hudParent);
+			_console->SetParent(hudParent);
 		}
 #if defined(WITH_EDITOR)
 		if (_playTestDebug != nullptr) {
@@ -1376,7 +1376,7 @@ namespace Jazz2
 
 	void LevelHandler::OnKeyPressed(const KeyboardEvent& event)
 	{
-		_pressedKeys.set((std::size_t)event.sym);
+		_pressedKeys.set((std::size_t)event.Sym);
 
 		if DEATH_UNLIKELY(_pauseMenu != nullptr) {
 			_pauseMenu->OnKeyPressed(event);
@@ -1387,7 +1387,7 @@ namespace Jazz2
 
 	void LevelHandler::OnKeyReleased(const KeyboardEvent& event)
 	{
-		_pressedKeys.reset((std::size_t)event.sym);
+		_pressedKeys.reset((std::size_t)event.Sym);
 
 		if DEATH_UNLIKELY(_pauseMenu != nullptr) {
 			_pauseMenu->OnKeyReleased(event);
@@ -1396,9 +1396,9 @@ namespace Jazz2
 
 	void LevelHandler::ResetPressedKeys(bool fromKeyboard)
 	{
-		const KeyboardState& keyboard = theApplication().GetInputManager().keyboardState();
+		const KeyboardState& keyboard = theApplication().GetInputManager().GetKeyboardState();
 		for (std::int32_t i = 0; i < (std::int32_t)Keys::Count; i++) {
-			if (fromKeyboard && keyboard.isKeyDown((Keys)i)) {
+			if (fromKeyboard && keyboard.IsKeyDown((Keys)i)) {
 				_pressedKeys.set((std::size_t)i);
 			} else {
 				_pressedKeys.reset((std::size_t)i);
@@ -2641,7 +2641,7 @@ namespace Jazz2
 #endif
 
 		_rootNode = CreateRootNode();
-		_rootNode->setVisitOrderState(SceneNode::VisitOrderState::Disabled);
+		_rootNode->SetVisitOrderState(SceneNode::VisitOrderState::Disabled);
 
 		_console = std::make_unique<UI::InGameConsole>(this);
 
@@ -3446,8 +3446,8 @@ namespace Jazz2
 		const JoyMappedState* joyStates[ControlScheme::MaxConnectedGamepads];
 		std::int32_t joyStatesCount = 0;
 		for (std::int32_t i = 0; i < JoyMapping::MaxNumJoysticks && joyStatesCount < std::int32_t(arraySize(joyStates)); i++) {
-			if (input.isJoyMapped(i)) {
-				joyStates[joyStatesCount++] = &input.joyMappedState(i);
+			if (input.IsJoyMapped(i)) {
+				joyStates[joyStatesCount++] = &input.GetJoyMappedState(i);
 			}
 		}
 
@@ -3640,7 +3640,7 @@ namespace Jazz2
 		_pauseMenu = std::make_shared<UI::Menu::InGameMenu>(this);
 		if (IsPausable()) {
 			// Prevent updating of all level objects
-			_rootNode->setUpdateEnabled(false);
+			_rootNode->SetUpdateEnabled(false);
 #if defined(NCINE_HAS_GAMEPAD_RUMBLE)
 			_rumble.CancelAllEffects();
 #endif
@@ -3664,7 +3664,7 @@ namespace Jazz2
 	void LevelHandler::ResumeGame()
 	{
 		// Resume all level objects
-		_rootNode->setUpdateEnabled(true);
+		_rootNode->SetUpdateEnabled(true);
 		// Hide in-game pause menu
 		_pauseMenu = nullptr;
 
