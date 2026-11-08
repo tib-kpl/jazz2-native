@@ -1,0 +1,37 @@
+name: 'Upstream merge check'
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Check:
+    if: github.repository == 'tib-kpl/jazz2-native'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check merge with upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/deathkiller/jazz2-native.git master
+          upstream=$(git rev-parse FETCH_HEAD)
+          if ! git merge-tree --write-tree HEAD "$upstream"; then
+            echo '::error::Upstream conflicts with this branch. Run tools/Sync-Upstream.ps1 locally and resolve the conflicts.'
+            exit 1
+          fi
