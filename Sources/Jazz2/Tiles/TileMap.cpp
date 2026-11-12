@@ -846,6 +846,13 @@ namespace Jazz2::Tiles
 		return (TileSet::GetTileMaskRow(tileSet->GetTileMask(tileId), py) & (1u << px)) == 0;
 	}
 
+	// The original lets a fast fall or rise break only the speed tiles right above or below the player
+	static bool IsInSpeedColumn(const TileCollisionParams& params, std::int32_t tx)
+	{
+		return (params.SpeedColumnX != 0.0f &&
+			std::abs(params.SpeedColumnX - (float)(tx * TileSet::DefaultTileSize + TileSet::DefaultTileSize / 2)) < 16.0f);
+	}
+
 	bool TileMap::IsTileEmpty(const AABBf& aabb, TileCollisionParams& params)
 	{
 		if (_sprLayerIndex == -1) {
@@ -884,7 +891,7 @@ namespace Jazz2::Tiles
 				LayerTile& tile = sprLayerLayout[y * layoutSize.X + x];
 
 				if (tile.DestructType == TileDestructType::Weapon && (params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon) {
-					if ((tile.TileParams & (1 << (std::uint16_t)params.UsedWeaponType)) != 0) {
+					if ((tile.TileParams & (1 << (std::uint16_t)params.UsedWeaponType)) != 0 || params.UsedWeaponType == WeaponType::TNT) {
 						if (AdvanceDestructibleTileAnimation(tile, x, y, params.WeaponStrength, "SceneryDestruct"_s)) {
 							params.TilesDestroyed++;
 							if (params.WeaponStrength <= 0) {
@@ -908,13 +915,16 @@ namespace Jazz2::Tiles
 							goto RecheckTile;
 						}
 					}
-				} else if (tile.DestructType == TileDestructType::Speed && (params.DestructType & TileDestructType::Speed) == TileDestructType::Speed) {
+				} else if (tile.DestructType == TileDestructType::Speed && ((params.DestructType & TileDestructType::Speed) == TileDestructType::Speed ||
+					((params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon && params.UsedWeaponType == WeaponType::TNT))) {
 					std::int32_t amount = 1;
-					if (tile.TileParams <= params.Speed && AdvanceDestructibleTileAnimation(tile, x, y, amount, "SceneryDestruct"_s)) {
+					// Whether the player is fast enough is decided by the caller, the value of the tile itself doesn't matter
+					if ((params.Speed > 0.0f || params.UsedWeaponType == WeaponType::TNT || IsInSpeedColumn(params, x)) && AdvanceDestructibleTileAnimation(tile, x, y, amount, "SceneryDestruct"_s)) {
 						params.TilesDestroyed++;
 						goto RecheckTile;
 					}
-				} else if (tile.DestructType == TileDestructType::Collapse && (params.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse) {
+				} else if (tile.DestructType == TileDestructType::Collapse && ((params.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse ||
+					((params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon && params.UsedWeaponType == WeaponType::TNT))) {
 					// O(1) membership check via a runtime tile flag instead of scanning _activeCollapsingTiles
 					if ((tile.Flags & LayerTileFlags::Collapsing) != LayerTileFlags::Collapsing) {
 						tile.Flags |= LayerTileFlags::Collapsing;
@@ -1027,7 +1037,7 @@ namespace Jazz2::Tiles
 
 				if ((tile.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon && (params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon) {
 					if (tile.DestructFrameIndex < GetTileDestructibleFrameCount(tile) &&
-						((tile.TileParams & (1 << (std::uint16_t)params.UsedWeaponType)) != 0 || params.UsedWeaponType == WeaponType::Freezer)) {
+						((tile.TileParams & (1 << (std::uint16_t)params.UsedWeaponType)) != 0 || params.UsedWeaponType == WeaponType::Freezer || params.UsedWeaponType == WeaponType::TNT)) {
 						return true;
 					}
 				} else if ((tile.DestructType & TileDestructType::Special) == TileDestructType::Special && (params.DestructType & TileDestructType::Special) == TileDestructType::Special) {
@@ -1037,11 +1047,13 @@ namespace Jazz2::Tiles
 							return true;
 						}
 					}
-				} else if ((tile.DestructType & TileDestructType::Speed) == TileDestructType::Speed && (params.DestructType & TileDestructType::Speed) == TileDestructType::Speed) {
-					if (tile.DestructFrameIndex < GetTileDestructibleFrameCount(tile) && tile.TileParams <= params.Speed) {
+				} else if ((tile.DestructType & TileDestructType::Speed) == TileDestructType::Speed && ((params.DestructType & TileDestructType::Speed) == TileDestructType::Speed ||
+					((params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon && params.UsedWeaponType == WeaponType::TNT))) {
+					if (tile.DestructFrameIndex < GetTileDestructibleFrameCount(tile) && (params.Speed > 0.0f || params.UsedWeaponType == WeaponType::TNT || IsInSpeedColumn(params, x))) {
 						return true;
 					}
-				} else if ((tile.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse && (params.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse) {
+				} else if ((tile.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse && ((params.DestructType & TileDestructType::Collapse) == TileDestructType::Collapse ||
+					((params.DestructType & TileDestructType::Weapon) == TileDestructType::Weapon && params.UsedWeaponType == WeaponType::TNT))) {
 					if ((tile.Flags & LayerTileFlags::Collapsing) != LayerTileFlags::Collapsing) {
 						return true;
 					}
@@ -4081,6 +4093,21 @@ namespace Jazz2::Tiles
 	std::uint8_t TileMap::GetLayerOriginalNumber(std::int32_t layerIndex) const
 	{
 		return (layerIndex >= 0 && layerIndex < (std::int32_t)_layers.size() ? _layers[layerIndex].OriginalNumber : 0);
+	}
+
+	std::uint16_t TileMap::GetDepthInFrontOfLayer(std::int32_t layerIndex) const
+	{
+		if (layerIndex < 0 || layerIndex >= (std::int32_t)_layers.size()) {
+			return 0;
+		}
+		const std::uint16_t depth = _layers[layerIndex].Description.Depth;
+		std::uint16_t nearest = 0;
+		for (const auto& layer : _layers) {
+			if (layer.Visible && layer.Description.Depth > depth && (nearest == 0 || layer.Description.Depth < nearest)) {
+				nearest = layer.Description.Depth;
+			}
+		}
+		return nearest;
 	}
 
 	void TileMap::SetLayerIdentity(std::int32_t layerIndex, StringView name, std::uint8_t originalNumber)

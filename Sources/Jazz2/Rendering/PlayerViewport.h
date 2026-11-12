@@ -53,6 +53,14 @@ namespace Jazz2::Rendering
 		BlurRenderPass _behindBlurPass1;
 		BlurRenderPass _behindBlurPass2;
 #endif
+		// The water in front of a layer behind the others, drawn in the middle of the scene (see DrawWater())
+		RenderCommand _waterCommand;
+#if defined(RHI_CAP_POSTPROCESSING)
+		// The copy of the scene below the water the water is drawn over, taken in the middle of the scene, allocated only
+		// for a level whose water may be there - a split pass of the scene view, and its bit
+		BlurRenderPass _waterCopyPass;
+		std::uint32_t _waterCopyPasses;
+#endif
 
 		std::unique_ptr<Viewport> _view;
 		std::unique_ptr<Texture> _viewTexture;	// Scene render target for the full tier; unused (null) on the direct tier
@@ -69,6 +77,20 @@ namespace Jazz2::Rendering
 		// the other way (see UpdateCamera)
 		float _lookAheadDirectionX;
 		float _lookAheadTurnTime;
+		// The original's camera: the lead's own step per axis (px per tick), how far the player travelled in the last
+		// tick (the camera trails it), and the keys and speed it read in the previous frame
+		Vector2f _legacyLeadStep;
+		Vector2f _legacyCameraTrail;
+		float _legacyCameraSpeed;
+		float _legacyCameraDrop;
+		std::int32_t _legacyCameraDirection;
+		// The pan of looking up or down, and the shake after a buttstomp landed: ticks left and the offset it adds
+		float _legacyLookOffset;
+		float _legacyQuakeTicks;
+		Vector2f _legacyQuakeOffset;
+		// The shake as drawn, eased towards the offset
+		Vector2f _legacyQuakeShown;
+		float _legacyQuakeAccum;
 		// How far the reforged camera has moved off its look-ahead onto the target itself, from 0 to 1, while the weapon
 		// wheel is held open (see UpdateCamera)
 		float _centerOnTargetProgress;
@@ -130,6 +152,38 @@ namespace Jazz2::Rendering
 			return &_layerEffects;
 		}
 #endif
+		/** @brief What the water needs, in the pixels of the view, shared by the combine pass and the water in the middle of the scene */
+		struct WaterView
+		{
+			/** @brief Waterline from the top edge of the view, negative when all of it is under the water */
+			float Level;
+			/** @brief Animation time of the wave, the ripple and the rays */
+			float Time;
+			/** @brief Position of the camera */
+			Vector2f CameraPos;
+			/** @brief Phases of the four sines of the wave at the left edge of the view, in cycles (`uWavePhase`) */
+			Vector4f WavePhase;
+			/** @brief Offset of the displacement lookup, the phase of the ripple at the top edge and the time axis of the low-power rays (`uWaterBase`) */
+			Vector4f Base;
+			/** @brief Noise coordinate of the low-power rays at the top left corner (`uRaysBase`) */
+			float RaysBase;
+		};
+
+		/** @brief Returns what the water needs in the current frame */
+		WaterView GetWaterView() const;
+		/** @brief Returns `true` if the water is drawn in the middle of the scene in the current frame, see @ref DrawWater() */
+		bool IsWaterInScene() const;
+		/** @brief Returns `true` if the viewport has what the water in the middle of the scene needs, or there's nothing to have */
+		bool HasWaterPasses() const;
+		/**
+		 * @brief Adds the water to the scene, while it's visited
+		 *
+		 * The water in front of a layer behind the others is drawn at its depth (see @ref LevelHandler::GetWaterDepth()), just
+		 * before the nearest layer in front, so all of that layer and the layers in front of it are drawn over it as they are.
+		 * On the shader tier it's drawn over a copy of the scene taken just before, the combine pass then adds the lighting to
+		 * all of it and the darkness above deep water. Does nothing if the combine pass draws the water in front of everything.
+		 */
+		void DrawWater(RenderQueue& renderQueue);
 		/** @brief Called at the end of each frame */
 		void OnEndFrame();
 		/** @brief Updates the camera position */
@@ -216,18 +270,20 @@ namespace Jazz2::Rendering
 		static constexpr float CameraFixEaseDuration = 30.0f;
 
 		// --- The original's camera, used when PreferencesCache::EnableReforgedCamera is off ---
-		// Measured off the original tick by tick; see the camera section of Docs/MovementAccuracyReference.dox.
-		// How far the lead is aimed is a property of the player (Player::GetCameraLookAhead); these two are how
-		// it gets there, and both are per one of the original's 70 Hz ticks.
+		// Measured off the original tick by tick; see the camera section of Docs/MovementAccuracyReference.dox. All
+		// per one of the original's 70 Hz ticks.
 		//
-		// Fraction of the remaining gap closed each tick. Read straight off the end of the approach, where the
-		// steps go 1.000, 0.500, 0.250, 0.125, 0.0625 - halving exactly.
-		static constexpr float LegacyCameraApproach = 0.5f;
-		// ...but never more than this per tick, which is what turns the first and longest part of the approach
-		// into a straight 1 px/tick ramp. A velocity, so it scales with the frame rate where the fraction above
-		// does not. This clamp is also active from the very first tick of a walk *and* of a dash, which is how
-		// the target is known to be a distance rather than something proportional to the speed.
-		static constexpr float LegacyCameraMaxStep = 1.0f;
+		// Horizontal lead aimed at per px/tick of speed in the direction held: 32 walking, 128 dashing
+		static constexpr float LegacyCameraLeadPerSpeed = 8.0f;
+		// Limits the lead's step eases towards: with the direction held, nothing held or the lead on the wrong side,
+		// and the direction held against the travel
+		static constexpr float LegacyCameraStepHeld = 1.0f;
+		static constexpr float LegacyCameraStepReleased = 2.0f;
+		static constexpr float LegacyCameraStepReversed = 4.0f;
+		// The buttstomp drop runs at the fast limit for its first 16 px, and returns at it
+		static constexpr float LegacyCameraDropFastRange = 16.0f;
+		// Travel in a tick beyond this is a teleport, not something to trail
+		static constexpr float LegacyCameraMaxTrail = 64.0f;
 
 		/** @brief Returns `true` if the view is at most half the default width, which makes the camera lead further */
 		bool IsSmallView() const;

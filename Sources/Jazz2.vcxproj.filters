@@ -1635,6 +1635,9 @@
     <ClInclude Include="Jazz2\Multiplayer\PacketTypes.h">
       <Filter>Header Files\Jazz2\Multiplayer</Filter>
     </ClInclude>
+    <ClInclude Include="Jazz2\Multiplayer\ServerMessage.h">
+      <Filter>Header Files\Jazz2\Multiplayer</Filter>
+    </ClInclude>
     <ClInclude Include="Jazz2\Multiplayer\RaceRouteGenerator.h">
       <Filter>Header Files\Jazz2\Multiplayer</Filter>
     </ClInclude>
@@ -1777,6 +1780,9 @@
       <Filter>Header Files\Jazz2\Multiplayer\GameModes</Filter>
     </ClInclude>
     <ClInclude Include="Jazz2\Multiplayer\GameModes\IGameMode.h">
+      <Filter>Header Files\Jazz2\Multiplayer\GameModes</Filter>
+    </ClInclude>
+    <ClInclude Include="Jazz2\Multiplayer\GameModes\GameModeBase.h">
       <Filter>Header Files\Jazz2\Multiplayer\GameModes</Filter>
     </ClInclude>
     <ClInclude Include="Jazz2\Multiplayer\GameModes\GameModeFactory.h">
@@ -2224,6 +2230,9 @@
       <Filter>Header Files\Jazz2\Rendering</Filter>
     </ClInclude>
     <ClInclude Include="Jazz2\Rendering\LightingRenderer.h">
+      <Filter>Header Files\Jazz2\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Jazz2\Rendering\WaterRenderer.h">
       <Filter>Header Files\Jazz2\Rendering</Filter>
     </ClInclude>
     <ClInclude Include="Jazz2\Rendering\XRayMaskRenderer.h">
@@ -3927,6 +3936,9 @@
       <Filter>Source Files\Jazz2\Rendering</Filter>
     </ClCompile>
     <ClCompile Include="Jazz2\Rendering\LightingRenderer.cpp">
+      <Filter>Source Files\Jazz2\Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="Jazz2\Rendering\WaterRenderer.cpp">
       <Filter>Source Files\Jazz2\Rendering</Filter>
     </ClCompile>
     <ClCompile Include="Jazz2\Rendering\XRayMaskRenderer.cpp">
