@@ -41,17 +41,17 @@ namespace nCine
 		 * two together would leave every run shorter than the maximum, and every remainder past a multiple
 		 * of it, drawn one command at a time.
 		 *
-		 * A batch never spans any of @p splitLayers: the commands below one and the ones from it up end up in
+		 * A batch never spans any of @p splitKeys: the commands below one and the ones from it up end up in
 		 * different batches, so the queue can be drawn in parts with something else in between (see
 		 * @ref RenderQueue::NextPart()). None splits nothing.
 		 *
 		 * @param srcQueue     Sorted source command queue
 		 * @param destQueue    Destination queue that receives batched and pass-through commands
-		 * @param splitLayers  Layers no batch may span, in ascending order
+		 * @param splitKeys    Layer sort keys no batch may span, in ascending order (see @ref RenderCommand::GetLayerSortKey())
 		 */
 #if defined(RHI_CAP_POSTPROCESSING) || defined(DOXYGEN_GENERATING_OUTPUT)
 		void CreateBatches(const SmallVectorImpl<RenderCommand*>& srcQueue, SmallVectorImpl<RenderCommand*>& destQueue,
-			ArrayView<const std::uint32_t> splitLayers = {});
+			ArrayView<const std::uint32_t> splitKeys = {});
 #else
 		void CreateBatches(const SmallVectorImpl<RenderCommand*>& srcQueue, SmallVectorImpl<RenderCommand*>& destQueue);
 #endif
@@ -97,10 +97,15 @@ namespace nCine
 		 * @p batchCommand, a command of its own that it keeps from frame to frame - which saves looking one up in the
 		 * pool and setting up its material from scratch every time.
 		 *
+		 * With @p retainedMemory the uniforms and instances are allocated into it instead and stay valid while
+		 * the caller keeps it, so an unchanged batch can be queued again in later frames as it is. Only for a
+		 * backend that draws from the uniform memory in place.
+		 *
 		 * @return `false` with @p batch left empty if batching is disabled or the shader has no batched variant that
 		 *         draws without vertex data --- the caller then submits a command per instance as before
 		 */
-		bool BeginDirectBatch(RenderCommand& refCommand, std::uint32_t maxInstances, DirectBatch& batch, RenderCommand* batchCommand = nullptr);
+		bool BeginDirectBatch(RenderCommand& refCommand, std::uint32_t maxInstances, DirectBatch& batch, RenderCommand* batchCommand = nullptr,
+			std::unique_ptr<std::uint8_t[]>* retainedMemory = nullptr);
 		/** @brief Finishes a batch started by @ref BeginDirectBatch() for the instances written into it */
 		void EndDirectBatch(DirectBatch& batch);
 

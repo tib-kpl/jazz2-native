@@ -108,11 +108,15 @@ namespace Jazz2::Scripting
 		return _this->_waterLayer;
 	}
 	std::int32_t LevelScriptLoader::set_waterLayer(std::int32_t value) {
-		// The water is always drawn in front of all the layers, but not at all for a layer that isn't there, as in JJ2+ -
-		// the actors are still in it then
+		// A number of no layer hides the water as in JJ2+, the actors are still in it then; 0 is in front of all (measured)
 		auto _this = ScriptLoader::FromActiveContext<LevelScriptLoader>();
 		_this->_waterLayer = value;
-		_this->_levelHandler->_waterHidden = (value < 1 || value > 8);
+		if (value == 0) {
+			_this->_levelHandler->SetWaterLayer(Formats::LevelSettingsChunk::WaterInFront);
+			return value;
+		}
+		std::int32_t index = _this->GetLayerIndex(value);
+		_this->_levelHandler->SetWaterLayer(index >= 0 ? index : Formats::LevelSettingsChunk::WaterHidden);
 		return value;
 	}
 	void LevelScriptLoader::setWaterGradient(std::uint8_t red1, std::uint8_t green1, std::uint8_t blue1, std::uint8_t red2, std::uint8_t green2, std::uint8_t blue2) {
@@ -394,8 +398,8 @@ namespace Jazz2::Scripting
 		/**
 		 * @brief Layer the water is drawn in front of
 		 *
-		 * 1 by default. Any value outside 1 to 8 hides the water. This only affects drawing, players still swim in
-		 * hidden water.
+		 * 1 by default, 0 is in front of all layers as well. Any value outside 0 to 8 hides the water. This only affects
+		 * drawing, players still swim in hidden water.
 		 *
 		 * @partialsupport Visible water is always drawn in front of all layers, the exact layer number currently
 		 * doesn't matter.

@@ -93,7 +93,7 @@ namespace Jazz2
 			The caption tile only feeds the RGB keyboard lighting on PC (HUD::UpdateRgbLights); the consoles
 			never read it, so they do not spend the decode and the 3 KB per level on it.
 		*/
-#if defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || \
+#if defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || \
 		defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_AMIGA) || \
 		defined(DEATH_TARGET_MORPHOS) || defined(DEATH_TARGET_AMIGAOS4)
 		constexpr bool KeepCaptionTiles = false;
@@ -146,7 +146,7 @@ namespace Jazz2
 	// Cache-busting version of the precompiled shader set - bump whenever any ".shader" source in
 	// "Sources/Shaders/" or the ShaderCompiler artifact format changes, so stale binary program caches
 	// are invalidated (12 = the switch from embedded sources to ShaderCompiler-generated artifacts)
-	static constexpr std::uint64_t ShadersVersion = 22;
+	static constexpr std::uint64_t ShadersVersion = 24;
 
 	ContentResolver& ContentResolver::Get()
 	{
@@ -207,6 +207,9 @@ namespace Jazz2
 		// DragonFS image appended to the ROM, mounted read-only at "rom:/", the packaging
 		// stages the tree under "Content/" inside it
 		return "rom:/Content/"_s;
+#elif defined(DEATH_TARGET_WIIU)
+		// Packed inside the .wuhb bundle, which the Aroma environment mounts read-only at "/vol/content"
+		return "fs:/vol/content/"_s;
 #elif defined(DEATH_TARGET_WII)
 		return "sd:/apps/Jazz2/Content/"_s;
 #elif defined(DEATH_TARGET_GAMECUBE)
@@ -412,6 +415,9 @@ namespace Jazz2
 #elif defined(DEATH_TARGET_N64)
 		// Read-only like the content path - the cache is prebaked into the DragonFS image
 		return "rom:/Cache/"_s;
+#elif defined(DEATH_TARGET_WIIU)
+		// Next to the .wuhb in the standard Aroma layout ("sd:/wiiu/apps/"), the SD card is "fs:/vol/external01"
+		return "fs:/vol/external01/wiiu/apps/Jazz2/Cache/"_s;
 #elif defined(DEATH_TARGET_WII)
 		return "sd:/apps/Jazz2/Cache/"_s;
 #elif defined(DEATH_TARGET_GAMECUBE)
@@ -451,6 +457,8 @@ namespace Jazz2
 		return "sdmc:/Games/Jazz2/Source/"_s;
 #elif defined(DEATH_TARGET_N64)
 		return "rom:/Source/"_s;
+#elif defined(DEATH_TARGET_WIIU)
+		return "fs:/vol/external01/wiiu/apps/Jazz2/Source/"_s;
 #elif defined(DEATH_TARGET_WII)
 		return "sd:/apps/Jazz2/Source/"_s;
 #elif defined(DEATH_TARGET_GAMECUBE)
@@ -2438,6 +2446,8 @@ namespace Jazz2
 		// Per-tile first visible row and reflection flag for the blur-behind layers (see TileSet::GetTileEffectInfo());
 		// set by BuildTilesetDiffuse() only where those layers are drawn with their effects
 		std::unique_ptr<std::uint8_t[]> tileEffectInfo;
+		// Which pixels of the tiles are drawn (see TileSet::IsTilePixelVisible()), set by BuildTilesetDiffuse() only with scripts
+		std::unique_ptr<std::uint8_t[]> tileVisibleMask;
 		// Whether tiles keep raw palette indices (recolored at draw time) vs baked colors; set by BuildTilesetDiffuse()
 		bool indexTiles = false;
 
@@ -2446,7 +2456,8 @@ namespace Jazz2
 			const bool lz4Content = ((flags & Formats::TileSetFile::ImageLz4) == Formats::TileSetFile::ImageLz4);
 			String name = path;
 			textureDiffuse = BuildTilesetDiffuse(s, name.data(), channelCount, lz4Content, usedTiles, atlasSlot, width, height, tileCount,
-				is32bitTile.get(), paletteRemapping, trueColorPalette, captionTileId, indexTiles, tileDiffuseOpaque, tileEffectInfo, captionTile);
+				is32bitTile.get(), paletteRemapping, trueColorPalette, captionTileId, indexTiles, tileDiffuseOpaque, tileEffectInfo,
+				tileVisibleMask, captionTile);
 			if (textureDiffuse.empty()) {
 				// A valid header always gives at least one tile to the atlas, so nothing means it couldn't be built
 				LOGE("Cannot build atlas of tile set \"{}\"", path);
@@ -2463,6 +2474,7 @@ namespace Jazz2
 			maskSize, Death::move(captionTile), tileDiffuseOpaque.get());
 		tileSet->IsIndexed = indexTiles;
 		tileSet->AtlasSlot = Death::move(atlasSlot);
+		tileSet->SetTileVisibleMask(Death::move(tileVisibleMask));
 #if defined(TILEMAP_LAYER_EFFECTS)
 		tileSet->SetTileEffectInfo(Death::move(tileEffectInfo));
 #endif
@@ -2587,7 +2599,8 @@ namespace Jazz2
 		bool lz4Content, const BitArray* usedTiles, std::unique_ptr<std::uint16_t[]>& atlasSlot,
 		std::uint32_t width, std::uint32_t height, std::uint16_t tileCount, const std::uint8_t* is32bitTile,
 		const std::uint8_t* paletteRemapping, const std::uint32_t* trueColorPalette, std::uint16_t captionTileId, bool& indexTiles,
-		std::unique_ptr<std::uint8_t[]>& tileDiffuseOpaque, std::unique_ptr<std::uint8_t[]>& tileEffectInfo, std::unique_ptr<Color[]>& captionTile)
+		std::unique_ptr<std::uint8_t[]>& tileDiffuseOpaque, std::unique_ptr<std::uint8_t[]>& tileEffectInfo,
+		std::unique_ptr<std::uint8_t[]>& tileVisibleMask, std::unique_ptr<Color[]>& captionTile)
 	{
 		// 32-bit (true-color) tiles have no palette index, so a tileset containing any must stay baked as RGBA;
 		// an all-8-bit tileset keeps raw palette indices and recolors at draw time (uploaded as R8). A single-channel
@@ -2745,7 +2758,7 @@ namespace Jazz2
 		// power-of-two textures (TinyGL on MorphOS), and the source sheet's own row width is exactly what
 		// broke on the PlayStation 2 above - secretf/haunted1's 32-tile row is 1088 px padded, which no
 		// limit that is a power of two can hold.
-#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_WII) || \
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || \
 		defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_PSP) || \
 		defined(DEATH_TARGET_3DS) || defined(WITH_RHI_LEGACYGL)
 		constexpr std::uint32_t PreferredAtlasTilesPerRow = 15;
@@ -2778,6 +2791,10 @@ namespace Jazz2
 		const std::uint32_t dstChannels = (indexTiles ? 1u : 4u);
 
 		tileDiffuseOpaque = std::make_unique<std::uint8_t[]>(tileCount);
+#if defined(WITH_ANGELSCRIPT)
+		// Scripts' weather isn't made where the sprite layer is drawn (see Scripting::LevelScriptLoader::SpawnWeatherParticles())
+		tileVisibleMask = std::make_unique<std::uint8_t[]>(std::size_t(tileCount) * TileSet::MaskBytesPerTile);
+#endif
 #if defined(TILEMAP_LAYER_EFFECTS)
 		// A tile the atlas leaves out has nothing visible and no reflection
 		tileEffectInfo = std::make_unique<std::uint8_t[]>(tileCount);
@@ -2817,7 +2834,7 @@ namespace Jazz2
 		// buffer needs), so the argument there is only about the SIZE of the run: a 510x1020 8-bit chunk is
 		// 64 contiguous pages out of a 352-page cache, which is the first thing to fail once the window is
 		// broken up. Half-height chunks are 32 pages each for the same total.
-#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_WII) || \
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || \
 		defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_PSP) || \
 		defined(DEATH_TARGET_3DS) || defined(WITH_RHI_LEGACYGL)
 #	if defined(DEATH_TARGET_N64)
@@ -2985,6 +3002,18 @@ namespace Jazz2
 
 				if (tileIdx < (std::int32_t)tileCount) {
 					tileDiffuseOpaque[tileIdx] = (opaque ? (opaqueAsDrawn ? 2 : 1) : 0);
+					if (tileVisibleMask != nullptr) {
+						// A pixel of index 0 or of no alpha isn't drawn
+						std::uint8_t* bits = &tileVisibleMask[std::size_t(tileIdx) * TileSet::MaskBytesPerTile];
+						for (std::uint32_t y = 0; y < TileSet::DefaultTileSize; y++) {
+							const std::uint8_t* row = &dstTile[((y + TileSet::TilePadding) * paddedWidth + TileSet::TilePadding) * dstChannels];
+							for (std::uint32_t x = 0; x < TileSet::DefaultTileSize; x++) {
+								if (row[x * dstChannels + (dstChannels - 1)] != 0) {
+									bits[(y * TileSet::DefaultTileSize + x) >> 3] |= std::uint8_t(1u << (x & 7));
+								}
+							}
+						}
+					}
 #if defined(TILEMAP_LAYER_EFFECTS)
 					tileEffectInfo[tileIdx] = ComputeTileEffectInfo(dstTile, paddedWidth, dstChannels, _palettes);
 #endif
@@ -3671,6 +3700,8 @@ namespace Jazz2
 		_precompiledShaders[(std::int32_t)PrecompiledShader::CombineDither] = CompileShader("CombineDither", ShadersGen::Combine, "DITHER");
 		_precompiledShaders[(std::int32_t)PrecompiledShader::CombineWithWaterDither] = CompileShader("CombineWithWaterDither", ShadersGen::CombineWithWater, "DITHER");
 		_precompiledShaders[(std::int32_t)PrecompiledShader::CombineWithWaterLowDither] = CompileShader("CombineWithWaterLowDither", ShadersGen::CombineWithWaterLow, "DITHER");
+		_precompiledShaders[(std::int32_t)PrecompiledShader::Water] = CompileShader("Water", ShadersGen::Water);
+		_precompiledShaders[(std::int32_t)PrecompiledShader::WaterLow] = CompileShader("WaterLow", ShadersGen::Water, "LOW");
 
 		_precompiledShaders[(std::int32_t)PrecompiledShader::TexturedBackground] = CompileShader("TexturedBackground", ShadersGen::TexturedBackground);
 		_precompiledShaders[(std::int32_t)PrecompiledShader::TexturedBackgroundDither] = CompileShader("TexturedBackgroundDither", ShadersGen::TexturedBackground, "DITHER");

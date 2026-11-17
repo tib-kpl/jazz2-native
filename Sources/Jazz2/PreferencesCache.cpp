@@ -161,10 +161,11 @@ namespace Jazz2
 	std::int32_t PreferencesCache::AudioSampleRate = 0;
 #endif
 	bool PreferencesCache::ToggleRunAction = false;
+	bool PreferencesCache::SwapJumpAndChangeWeaponInMenu = false;
 #if defined(DEATH_TARGET_N64)
 	GamepadType PreferencesCache::GamepadButtonLabels = GamepadType::Nintendo64;
 #elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || \
-		defined(DEATH_TARGET_3DS)
+		defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_3DS)
 	GamepadType PreferencesCache::GamepadButtonLabels = GamepadType::Switch;
 #elif defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_VITA) || \
 		defined(DEATH_TARGET_PS3)
@@ -1024,7 +1025,7 @@ namespace
 		bool overrideConfigPath = false;
 
 #	if !defined(DEATH_TARGET_ANDROID) && !defined(DEATH_TARGET_IOS) && !defined(DEATH_TARGET_SWITCH) && \
-		!defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_WII) && !defined(DEATH_TARGET_GAMECUBE) && \
+		!defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_WII) && !defined(DEATH_TARGET_WIIU) && !defined(DEATH_TARGET_GAMECUBE) && \
 		!defined(DEATH_TARGET_3DS) && !defined(DEATH_TARGET_DREAMCAST) && !defined(DEATH_TARGET_PS2) && !defined(DEATH_TARGET_PS3) && \
 		!defined(DEATH_TARGET_PSP) && !defined(DEATH_TARGET_VITA)
 		for (std::int32_t i = 0; i < config.GetArgc(); i++) {
@@ -1202,7 +1203,7 @@ namespace
 					_configPath = fs::CombinePath(fs::GetDirectoryName(resolver.GetSourcePath()), "Jazz2.config"_s);
 				}
 			}
-#	elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || \
+#	elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_WIIU) || \
 				defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_VITA) || defined(DEATH_TARGET_AMIGAOS)
 			// Save config file next to `Source` directory (on the storage device the content is read from;
 			// on the Amiga that is the game's own directory, the conventional home of a program's settings)
@@ -1252,7 +1253,7 @@ namespace
 			theApplication().AttachTraceTarget(fs::CombinePath(configDir, "Jazz2.log"_s));
 #			endif
 		}
-#		elif defined(DEATH_TARGET_ANDROID) || defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WII) || \
+#		elif defined(DEATH_TARGET_ANDROID) || defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || \
 			defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_VITA)
 		fs::CreateDirectories(configDir);
 #			if defined(DEATH_TRACE_LOG_PATH)
@@ -1372,6 +1373,7 @@ namespace
 					EnableRgbLights = ((boolOptions & BoolOptions::EnableRgbLights) == BoolOptions::EnableRgbLights);
 					AllowUnsignedScripts = ((boolOptions & BoolOptions::AllowUnsignedScripts) == BoolOptions::AllowUnsignedScripts);
 					ToggleRunAction = ((boolOptions & BoolOptions::ToggleRunAction) == BoolOptions::ToggleRunAction);
+					SwapJumpAndChangeWeaponInMenu = ((boolOptions & BoolOptions::SwapJumpAndChangeWeaponInMenu) == BoolOptions::SwapJumpAndChangeWeaponInMenu);
 					UseNativeBackButton = ((boolOptions & BoolOptions::UseNativeBackButton) == BoolOptions::UseNativeBackButton);
 					EnableDiscordIntegration = ((boolOptions & BoolOptions::EnableDiscordIntegration) == BoolOptions::EnableDiscordIntegration);
 					TutorialCompleted = ((boolOptions & BoolOptions::TutorialCompleted) == BoolOptions::TutorialCompleted);
@@ -1693,7 +1695,7 @@ namespace
 #elif defined(DEATH_TARGET_N64)
 			// Use Nintendo 64 button labels
 			GamepadButtonLabels = GamepadType::Nintendo64;
-#elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_3DS)
+#elif defined(DEATH_TARGET_SWITCH) || defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_3DS)
 			// Use Switch button labels
 			GamepadButtonLabels = GamepadType::Switch;
 #elif defined(DEATH_TARGET_PS2) || defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_VITA) || \
@@ -1715,7 +1717,7 @@ namespace
 		}
 
 #if !defined(DEATH_TARGET_ANDROID) && !defined(DEATH_TARGET_IOS) && !defined(DEATH_TARGET_SWITCH) && \
-		!defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_WII) && !defined(DEATH_TARGET_GAMECUBE) && \
+		!defined(DEATH_TARGET_N64) && !defined(DEATH_TARGET_WII) && !defined(DEATH_TARGET_WIIU) && !defined(DEATH_TARGET_GAMECUBE) && \
 		!defined(DEATH_TARGET_3DS) && !defined(DEATH_TARGET_DREAMCAST) && !defined(DEATH_TARGET_PS2) && !defined(DEATH_TARGET_PS3) && \
 		!defined(DEATH_TARGET_PSP) && !defined(DEATH_TARGET_VITA)
 		// Override some settings by command-line arguments
@@ -1886,6 +1888,7 @@ namespace
 		if (EnableRgbLights) boolOptions |= BoolOptions::EnableRgbLights;
 		if (AllowUnsignedScripts) boolOptions |= BoolOptions::AllowUnsignedScripts;
 		if (ToggleRunAction) boolOptions |= BoolOptions::ToggleRunAction;
+		if (SwapJumpAndChangeWeaponInMenu) boolOptions |= BoolOptions::SwapJumpAndChangeWeaponInMenu;
 		if (UseNativeBackButton) boolOptions |= BoolOptions::UseNativeBackButton;
 		if (EnableDiscordIntegration) boolOptions |= BoolOptions::EnableDiscordIntegration;
 		if (TutorialCompleted) boolOptions |= BoolOptions::TutorialCompleted;
@@ -2161,6 +2164,8 @@ namespace
 		bool isAtmosphere = Environment::HasSwitchAtmosphere();
 		String deviceDesc = format("{}|Nintendo Switch {}.{}.{}{}{}||9|{}", hostName,
 			((switchVersion >> 16) & 0xFF), ((switchVersion >> 8) & 0xFF), (switchVersion & 0xFF), isAtmosphere ? " (Atmosphère)"_s : ""_s, systemSuffix, arch);
+#elif defined(DEATH_TARGET_WIIU)
+		String deviceDesc = format("{}|Nintendo Wii U{}||14|{}", hostName, systemSuffix, arch);
 #elif defined(DEATH_TARGET_WII)
 		String deviceDesc = format("{}|Nintendo Wii{}||14|{}", hostName, systemSuffix, arch);
 #elif defined(DEATH_TARGET_GAMECUBE)

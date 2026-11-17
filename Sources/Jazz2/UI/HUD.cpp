@@ -1441,7 +1441,7 @@ namespace Jazz2::UI
 		return (res != nullptr && res->Base != nullptr && res->Base->TextureDiffuse != nullptr ? res : nullptr);
 	}
 
-	void HUD::DrawGraphics(const GraphicResource* res, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color, float scaleX, float scaleY, bool additiveBlending, float angle)
+	void HUD::DrawGraphics(const GraphicResource* res, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color, float scaleX, float scaleY, bool additiveBlending, float angle, bool singleColor)
 	{
 		if (res == nullptr || res->Base == nullptr || res->Base->TextureDiffuse == nullptr) {
 			return;
@@ -1470,7 +1470,8 @@ namespace Jazz2::UI
 		);
 
 		std::int32_t paletteOffset = ((base->Flags & GenericGraphicResourceFlags::Indexed) == GenericGraphicResourceFlags::Indexed ? res->PaletteOffset : -1);
-		DrawTexture(*base->TextureDiffuse.get(), adjustedPos, z, size, texCoords, color, additiveBlending ? BlendMode::Additive : BlendMode::Normal, angle, paletteOffset);
+		Shader* shader = (singleColor ? ContentResolver::Get().GetShader(paletteOffset >= 0 ? PrecompiledShader::WhiteMaskPalette : PrecompiledShader::WhiteMask) : nullptr);
+		DrawTexture(*base->TextureDiffuse.get(), adjustedPos, z, size, texCoords, color, additiveBlending ? BlendMode::Additive : BlendMode::Normal, angle, paletteOffset, shader);
 	}
 
 	bool HUD::DrawElementWithPalette(AnimState state, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color, float paletteOffset, float scaleX, float scaleY)
@@ -1705,6 +1706,9 @@ namespace Jazz2::UI
 		}
 		state.VerticesCount = 0;
 		state.RenderCommandsCount = 0;
+#if defined(WITH_RHI_RDP)
+		state.MergedVerticesCount = 0;
+#endif
 
 		float requestedAngle;
 		std::int32_t requestedIndex;
@@ -1788,7 +1792,9 @@ namespace Jazz2::UI
 					scale = 0.9f;
 				}
 
-				DrawElement(WeaponWheelDim, -1, pos.X, pos.Y, ShadowLayer - 10, Alignment::Center, Colorf(0.0f, 0.0f, 0.0f, alpha * 0.6f), 5.0f, 5.0f);
+				if constexpr (WeaponWheelDimsEnabled) {
+					DrawElement(WeaponWheelDim, -1, pos.X, pos.Y, ShadowLayer - 10, Alignment::Center, Colorf(0.0f, 0.0f, 0.0f, alpha * 0.6f), 5.0f, 5.0f);
+				}
 
 				// The Blaster icon is tinted with the player's colors (like the character icon), so recolor it to match
 				// when the player is being recolored; every other weapon has fixed colors and uses the plain (baked) icon.
@@ -1872,6 +1878,14 @@ namespace Jazz2::UI
 				j++;
 			}
 		}
+
+#if defined(WITH_RHI_RDP)
+		// The arcs collected into one mesh (see DrawWeaponWheelSegment())
+		if (state.MergedVerticesCount > 0) {
+			DrawWeaponWheelMesh(state, state.MergedVertices.get(), state.MergedVerticesCount, PrimitiveType::Lines,
+				state.MergedLayer, lineTexture, state.MergedColor);
+		}
+#endif
 	}
 
 	void HUD::UpdateWeaponWheel(float timeMult)
@@ -1911,7 +1925,6 @@ namespace Jazz2::UI
 		auto& state = _weaponWheel[player->_playerIndex];
 
 		if (PreferencesCache::WeaponWheel == WeaponWheelStyle::Disabled || player == nullptr ||
-			!((player->_controllable && player->_controllableExternal) || !_levelHandler->IsReforged()) ||
 			player->_playerType == PlayerType::Frog || player->_playerType == PlayerType::Bird) {
 			if (state.Anim > 0.0f) {
 				state.Shown = false;
@@ -2017,6 +2030,28 @@ namespace Jazz2::UI
 			vertices[j].V = 0.0f;
 		}
 
+#if defined(WITH_RHI_RDP)
+		// Arcs with the same color and layer are collected into one list of lines, drawn once the wheel is
+		// complete (see DrawWeaponWheel()), instead of a strip and a render command each. An arc that differs
+		// from the first one collected is still a strip.
+		if (state.MergedVerticesCount == 0 || (state.MergedLayer == z && state.MergedColor == color)) {
+			const std::int32_t lineVertexCount = (vertexCount - 1) * 2;
+			if (state.MergedVerticesCount + lineVertexCount <= WeaponWheelMaxMergedVertices) {
+				if (state.MergedVertices == nullptr) {
+					state.MergedVertices = std::make_unique<Vertex[]>(WeaponWheelMaxMergedVertices);
+				}
+				Vertex* lines = &state.MergedVertices[state.MergedVerticesCount];
+				for (std::int32_t i = 1; i < vertexCount; i++) {
+					*lines++ = vertices[i - 1];
+					*lines++ = vertices[i];
+				}
+				state.MergedVerticesCount += lineVertexCount;
+				state.MergedLayer = z;
+				state.MergedColor = color;
+				return;
+			}
+		}
+#endif
 		DrawWeaponWheelMesh(state, vertices, vertexCount, PrimitiveType::LineStrip, z, texture, color);
 	}
 
@@ -2501,7 +2536,11 @@ namespace Jazz2::UI
 	}
 
 	HUD::WeaponWheelState::WeaponWheelState()
-		: Anim(0.0f), LastIndex(-1), SegmentSize{-1.0f, -1.0f}, SegmentSizePow{0.0f, 0.0f}, Shown(false)
+		: Anim(0.0f), LastIndex(-1), SegmentSize{-1.0f, -1.0f}, SegmentSizePow{0.0f, 0.0f},
+#if defined(WITH_RHI_RDP)
+			MergedVerticesCount(0), MergedLayer(0),
+#endif
+			Shown(false)
 	{
 	}
 }

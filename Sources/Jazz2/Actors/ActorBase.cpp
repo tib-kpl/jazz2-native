@@ -280,6 +280,13 @@ namespace Jazz2::Actors
 		// Can be overridden
 	}
 
+	float ActorBase::ReplaceLevelGravity(float gravity, float baseGravity) const
+	{
+		// Whatever else scales the base gravity (water) is kept
+		float levelGravity = _levelHandler->GetGravity();
+		return (levelGravity > 0.0f ? gravity * baseGravity / levelGravity : baseGravity);
+	}
+
 	void ActorBase::OnDetach(ActorBase* parent)
 	{
 		// Can be overridden
@@ -401,17 +408,34 @@ namespace Jazz2::Actors
 			effectiveSpeedX = _speed.X + _externalForce.X * timeMult;
 			effectiveSpeedY = _speed.Y + 0.5f * accelY;
 		}
+		// The original moves by each tick's new speed; over a frame of several ticks (or part of one) that is the
+		// average of those speeds, not the last one, otherwise distances depend on the frame rate
+		if (_frameSpeedChangeX != 0.0f) {
+			float ticks = timeMult * Player::LegacyFrameRateScale;
+			if (ticks > 0.0f) {
+				effectiveSpeedX -= _frameSpeedChangeX * (ticks - 1.0f) / (2.0f * ticks);
+			}
+			_frameSpeedChangeX = 0.0f;
+		}
+
 		// Half a step of gravity (velocity Verlet) keeps jump height frame-rate independent, only in flight
 		// and before the rise cap, otherwise a capped rise is slowed twice
 		if (currentGravity > 0.0f && (_state & ActorState::ApplyGravitation) == ActorState::ApplyGravitation &&
 			(_speed.Y < 0.0f || (_state & ActorState::CanJump) != ActorState::CanJump)) {
-			// No Euler bias here, it breaks the fitted rises (see Docs/MovementAccuracyReference.dox)
-			effectiveSpeedY += 0.5f * GetGravityModifier(currentGravity, /*isRising:*/_speed.Y < 0.0f) * timeMult;
+			float gravityStep = GetGravityModifier(currentGravity, /*isRising:*/_speed.Y < 0.0f);
+			effectiveSpeedY += 0.5f * gravityStep * timeMult;
+			// The original moves by the speed after each tick's gravity, half a tick more than the average
+			if (_gravityBeforeMove) {
+				effectiveSpeedY += 0.5f * gravityStep / Player::LegacyFrameRateScale;
+			}
 		}
 
 		// Only the applied rise is capped, `_speed.Y` keeps its momentum, as the original's springs and jumps
 		if (_maxRiseSpeed > 0.0f && effectiveSpeedY < -_maxRiseSpeed) {
 			effectiveSpeedY = -_maxRiseSpeed;
+		}
+		if (_maxFallSpeed > 0.0f && effectiveSpeedY > _maxFallSpeed) {
+			effectiveSpeedY = _maxFallSpeed;
 		}
 		// Same on the horizontal axis, as the original's dash
 		if (_maxAppliedSpeedX > 0.0f) {
@@ -421,6 +445,16 @@ namespace Jazz2::Actors
 		effectiveSpeedX *= timeMult;
 		effectiveSpeedY *= timeMult;
 
+		// A stalled tick moves nowhere, see `_landingStall`
+		if (_moveStallLeft > 0.0f && timeMult > 0.0f) {
+			float held = std::min(_moveStallLeft, timeMult);
+			_moveStallLeft -= held;
+			float moving = 1.0f - held / timeMult;
+			effectiveSpeedX *= moving;
+			effectiveSpeedY *= moving;
+		}
+
+		bool groundedBeforeMove = ((_state & ActorState::CanJump) == ActorState::CanJump && _speed.Y >= 0.0f);
 		Vector2f posBefore = _pos;
 		bool movementAttempted = (std::abs(effectiveSpeedX) > 0.0f || std::abs(effectiveSpeedY) > 0.0f);
 		if (movementAttempted) {
@@ -461,6 +495,39 @@ namespace Jazz2::Actors
 				}
 				if (!stepMoved || (stepX == 0.0f && stepY == 0.0f)) {
 					break;
+				}
+			}
+
+			// Measured in the original: falling while moving sideways lands on a floor that close below the move,
+			// only when a wall didn't stop that move
+			if (_airFloorSnapReach > 0.0f && !result.HitFloor && !result.HitWall && stepY > 0.0f && _speed.Y > 0.0f &&
+				(_state & ActorState::CanJump) != ActorState::CanJump && timeMult > 0.0f &&
+				std::abs(effectiveSpeedX) / (timeMult * Player::LegacyFrameRateScale) >= AirFloorSnapMinStepX) {
+				// Every other check step first, then the step skipped just above the one found
+				float snapDiff = -1.0f;
+				for (float yDiff = 0.0f; yDiff < _airFloorSnapReach; yDiff += 2.0f * CollisionCheckStep) {
+					if (IsSupportedAfterMove(0.0f, yDiff)) {
+						snapDiff = (yDiff > 0.0f && IsSupportedAfterMove(0.0f, yDiff - CollisionCheckStep) ? yDiff - CollisionCheckStep : yDiff);
+						break;
+					}
+				}
+				if (snapDiff < 0.0f) {
+					// The last check step of the reach is one of the skipped ones
+					std::int32_t lastStep = (std::int32_t)std::ceil(_airFloorSnapReach / CollisionCheckStep) - 1;
+					if (lastStep > 0 && (lastStep & 1) != 0 && IsSupportedAfterMove(0.0f, lastStep * CollisionCheckStep)) {
+						snapDiff = lastStep * CollisionCheckStep;
+					}
+				}
+				if (snapDiff >= 0.0f) {
+					if (snapDiff > 0.0f) {
+						MoveInstantly(Vector2f(0.0f, snapDiff), MoveType::Relative, params);
+					}
+					// Measured in the original: this landing keeps its fall speed, so a fall faster than the
+					// step height loses the next tick's whole move
+					if (_landingStall && _speed.Y / Player::LegacyFrameRateScale >
+						LandingStepHeight + std::floor(std::abs(_speed.X) / Player::LegacyFrameRateScale)) {
+						_moveStallLeft = 1.0f / Player::LegacyFrameRateScale;
+					}
 				}
 			}
 
@@ -512,7 +579,16 @@ namespace Jazz2::Actors
 					// Only the bottom of a reduced hitbox finds the floor, for a player just its feet (measured in JJ2+)
 					aabb.T = std::max(aabb.T, aabb.B - ((_state & ActorState::CollideWithTilesetLegacy) == ActorState::CollideWithTilesetLegacy ? 2.0f : std::max(14.0f, (aabb.B - aabb.T) - 10.0f)));
 				}
-				if (_levelHandler->IsPositionEmpty(this, aabb, params)) {
+				// Measured in the original: footing is judged where the player stood a tick ago, so walking off a ledge
+				// keeps it for one more tick (whatever the frame rate)
+				bool footingTickAgo = false;
+				if (_footingGrace && groundedBeforeMove && timeMult > 0.0f && _pos != posBefore) {
+					Vector2f tickTravel = (_pos - posBefore) / (timeMult * Player::LegacyFrameRateScale);
+					AABBf feet = aabb + Vector2f(-tickTravel.X, -tickTravel.Y);
+					TileCollisionParams probeParams = { TileDestructType::None, true };
+					footingTickAgo = !_levelHandler->IsPositionEmpty(this, feet, probeParams);
+				}
+				if (!footingTickAgo && _levelHandler->IsPositionEmpty(this, aabb, params)) {
 					// There is still some space below - only apply gravity
 					SetState(ActorState::CanJump, false);
 					_speed.Y += GetGravityModifier(currentGravity, /*isRising:*/false) * timeMult;
@@ -554,7 +630,8 @@ namespace Jazz2::Actors
 			// Ground-bound movement tries angles from a bit over 45 degrees down to 45 degrees up to stick to slopes.
 			// A downward candidate needs ground under it, otherwise gaps are fallen into instead of jumped over.
 			bool success = false;
-			float maxYDiff = std::max(3.0f, std::abs(stepX) + 2.5f);
+			// Whole check steps, otherwise the height found on a flat floor wobbles with the frame time
+			float maxYDiff = std::ceil(std::max(3.0f, std::abs(stepX) + 2.5f) / CollisionCheckStep) * CollisionCheckStep;
 			for (float yDiff = maxYDiff + stepY; yDiff >= -maxYDiff + stepY; yDiff -= CollisionCheckStep) {
 				if (yDiff > stepY && !IsSupportedAfterMove(stepX, yDiff)) {
 					continue;
@@ -602,7 +679,7 @@ namespace Jazz2::Actors
 		// Mostly-horizontal airborne movement climbs gentle upslopes instead of stopping at their foot
 		bool movedHorizontally = MoveInstantly(Vector2f(stepX, 0.0f), MoveType::Relative, params);
 		// `>=` so a jump into a 45 degree slope keeps its momentum, as in the original
-		if (!movedHorizontally && std::abs(stepX) >= std::abs(stepY)) {
+		if (!movedHorizontally && _climbsSlopesInAir && std::abs(stepX) >= std::abs(stepY)) {
 			float maxClimb = std::abs(stepX) + 2.5f;
 			// Landing on a ledge edge reaches `_landingTolerance`, only when really descending
 			// so walls don't get easier to mount
@@ -800,6 +877,11 @@ namespace Jazz2::Actors
 		float y = _pos.Y - res->Base->Hotspot.Y;
 
 		if (effect == ParticleDebrisEffect::Fire) {
+			// Nothing of it would be kept, the debris and the smoke are both off
+			if (PreferencesCache::Particles == ParticleQuality::Off) {
+				return;
+			}
+
 			constexpr std::int32_t DebrisSize = 3;
 
 			Vector2i texSize = texture->GetSize();
@@ -810,24 +892,45 @@ namespace Jazz2::Actors
 			// Coarser step for big sprites, consoles can't afford thousands of particles
 			const std::int32_t step = Tiles::TileMap::GetParticleDebrisStep(DebrisSize, debrisRect.W, debrisRect.H);
 			const float particleSize = (float)(step - 1);
+			// With a debris budget the burning pieces come first, the flames and embers only get what they leave
+			std::int32_t extrasLeft = INT32_MAX;
+			if constexpr (Tiles::TileMap::MaxDebrisCount > 0) {
+				const std::int32_t pieceCount = ((debrisRect.W + step - 1) / step) * ((debrisRect.H + step - 1) / step);
+				extrasLeft = Tiles::TileMap::MaxDebrisCount - tilemap->GetDebrisCount() - pieceCount;
+			}
+			const bool withFlames = (PreferencesCache::Particles != ParticleQuality::Low);
+			const bool facingLeft = IsFacingLeft();
+			const float facing = (facingLeft ? -1.0f : 1.0f);
 
 			for (std::int32_t fy = 0; fy < debrisRect.H; fy += step) {
+				// Fire climbs from below, so lower pieces start already further burnt
+				const float burntFromBelow = float(fy) / float(debrisRect.H);
+
 				for (std::int32_t fx = 0; fx < debrisRect.W; fx += step) {
 					float currentSize = particleSize * Random().FastFloat(0.8f, 1.1f);
+					float spreadX = float(fx - debrisRect.W / 2) / float(debrisRect.W);
 
 					Tiles::TileMap::DestructibleDebris debris{};
-					debris.Pos = Vector2f(x + (IsFacingLeft() ? res->Base->FrameDimensions.X - frameOffset.X - fx : frameOffset.X + fx), y + frameOffset.Y + fy);
+					debris.Pos = Vector2f(x + (facingLeft ? res->Base->FrameDimensions.X - frameOffset.X - fx : frameOffset.X + fx), y + frameOffset.Y + fy);
 					debris.Depth = _renderer.GetLayer();
 					debris.Size = Vector2f(currentSize, currentSize);
-					debris.Speed = Vector2f(((fx - debrisRect.W / 2) + Random().FastFloat(-2.0f, 2.0f)) * (IsFacingLeft() ? -1.0f : 1.0f) * Random().FastFloat(0.5f, 2.0f) / debrisRect.W,
-						 Random().FastFloat(0.0f, 0.2f));
-					debris.Acceleration = Vector2(0.0f, 0.06f);
+					debris.Speed = Vector2f(spreadX * facing * Random().FastFloat(0.2f, 0.9f) + Random().FastFloat(-0.25f, 0.25f), Random().FastFloat(-0.6f, -0.1f));
+					debris.Acceleration = Vector2f(0.0f, Random().FastFloat(-0.02f, -0.008f));
 
 					debris.Scale = 1.0f;
+					debris.ScaleSpeed = Random().FastFloat(-0.014f, -0.006f);
+					debris.Angle = 0.0f;
+					debris.AngleSpeed = Random().FastFloat(-0.04f, 0.04f);
 					debris.Alpha = 1.0f;
-					debris.AlphaSpeed = -0.001f;
+					debris.AlphaSpeed = Random().FastFloat(-0.008f, -0.003f);
 
-					debris.Time = 320.0f;
+					// Heats up to orange, then smoulders through red to char
+					debris.TintSpeed = Vector3f(Random().FastFloat(-0.010f, -0.006f), Random().FastFloat(-0.030f, -0.018f), Random().FastFloat(-0.050f, -0.030f));
+					float burnt = burntFromBelow * Random().FastFloat(0.0f, 14.0f);
+					debris.Tint = Vector3f(std::max(1.0f + debris.TintSpeed.X * burnt, 0.0f), std::max(Random().FastFloat(0.85f, 1.0f) + debris.TintSpeed.Y * burnt, 0.0f),
+						std::max(Random().FastFloat(0.6f, 0.9f) + debris.TintSpeed.Z * burnt, 0.0f));
+
+					debris.Time = Random().FastFloat(70.0f, 120.0f);
 
 					debris.TexScaleX = (currentSize / float(texSize.X));
 					debris.TexBiasX = ((float(debrisRect.X) + (float)fx) / float(texSize.X));
@@ -836,10 +939,61 @@ namespace Jazz2::Actors
 
 					debris.DiffuseTexture = texture;
 					debris.PaletteOffset = paletteDebrisOffset;
-					debris.Flags = Tiles::TileMap::DebrisFlags::Bounce;
+					debris.Flags = Tiles::TileMap::DebrisFlags::None;
 
 					tilemap->CreateDebris(debris);
+
+					if (!withFlames || extrasLeft <= 0) {
+						continue;
+					}
+
+					std::int32_t roll = Random().Fast(0, 6);
+					if (roll <= 2) {
+						extrasLeft--;
+					}
+					if (roll < 2) {
+						// Glowing copy of the piece, licks upwards like a flame tongue
+						Tiles::TileMap::DestructibleDebris flame = debris;
+						flame.Speed = Vector2f(Random().FastFloat(-0.4f, 0.4f), Random().FastFloat(-1.2f, -0.5f));
+						flame.Acceleration = Vector2f(0.0f, -0.03f);
+						flame.Scale = Random().FastFloat(1.3f, 1.8f);
+						flame.ScaleSpeed = Random().FastFloat(-0.04f, -0.025f);
+						flame.AngleSpeed = 0.0f;
+						flame.Alpha = Random().FastFloat(0.7f, 1.0f);
+						flame.AlphaSpeed = Random().FastFloat(-0.03f, -0.018f);
+						flame.Tint = Vector3f(1.0f, Random().FastFloat(0.45f, 0.7f), Random().FastFloat(0.05f, 0.2f));
+						flame.TintSpeed = Vector3f(0.0f, -0.01f, -0.005f);
+						flame.Time = 50.0f;
+						flame.Flags = Tiles::TileMap::DebrisFlags::AdditiveBlending;
+						tilemap->CreateDebris(flame);
+					} else if (roll == 2) {
+						// Ember flying off with the hot air
+						Tiles::TileMap::DestructibleDebris ember = debris;
+						float emberSize = Random().FastFloat(1.0f, 2.0f);
+						ember.Size = Vector2f(emberSize, emberSize);
+						ember.TexScaleX = (emberSize / float(texSize.X));
+						ember.TexScaleY = (emberSize / float(texSize.Y));
+						ember.Speed = Vector2f(Random().FastFloat(-1.2f, 1.2f), Random().FastFloat(-2.5f, -1.0f));
+						ember.Acceleration = Vector2f(Random().FastFloat(-0.01f, 0.01f), -0.01f);
+						ember.Scale = 1.0f;
+						ember.ScaleSpeed = 0.0f;
+						ember.AngleSpeed = 0.0f;
+						ember.Alpha = 1.0f;
+						ember.AlphaSpeed = Random().FastFloat(-0.025f, -0.012f);
+						ember.Tint = Vector3f(1.0f, 0.8f, 0.4f);
+						ember.TintSpeed = Vector3f(0.0f, -0.012f, -0.012f);
+						ember.Time = 80.0f;
+						ember.Flags = Tiles::TileMap::DebrisFlags::AdditiveBlending;
+						tilemap->CreateDebris(ember);
+					}
 				}
+			}
+
+			// Smoke rising from what's left
+			std::int32_t smokeCount = std::clamp<std::int32_t>(debrisRect.W * debrisRect.H / 600, 1, 3);
+			for (std::int32_t i = 0; i < smokeCount; i++) {
+				Explosion::Create(_levelHandler, Vector3i((std::int32_t)(_pos.X + Random().FastFloat(-0.3f, 0.3f) * debrisRect.W),
+					(std::int32_t)(y + frameOffset.Y + Random().FastFloat(0.0f, 0.4f) * debrisRect.H), _renderer.GetLayer() + 10), Explosion::Type::SmokeGray, 1.0f);
 			}
 			return;
 		}
@@ -1348,6 +1502,57 @@ namespace Jazz2::Actors
 		return false;
 	}
 
+	std::int32_t ActorBase::GetOverlappingPixelCount(ActorBase* other, std::int32_t limit)
+	{
+		GraphicResource* res1 = (_currentTransition != nullptr ? _currentTransition : _currentAnimation);
+		GraphicResource* res2 = (other->_currentTransition != nullptr ? other->_currentTransition : other->_currentAnimation);
+		if (res1 == nullptr || res2 == nullptr || res1->Base->Mask == nullptr || res2->Base->Mask == nullptr ||
+			std::abs(_renderer.GetRotation()) > 0.1f || std::abs(other->_renderer.GetRotation()) > 0.1f) {
+			return (IsCollidingWith(other) ? limit : 0);
+		}
+
+		const std::int32_t maskFrame1 = std::min(_renderer.CurrentFrame, res1->FrameCount - 1);
+		const std::int32_t maskFrame2 = std::min(other->_renderer.CurrentFrame, res2->FrameCount - 1);
+		const bool facingLeft1 = GetState(ActorState::IsFacingLeft);
+		const bool facingLeft2 = other->GetState(ActorState::IsFacingLeft);
+		const Recti frameRect1 = res1->Base->GetFrameRect(maskFrame1);
+		const Recti frameRect2 = res2->Base->GetFrameRect(maskFrame2);
+		const Vector2i frameAnchor1 = res1->Base->GetFrameAnchor(maskFrame1, facingLeft1);
+		const Vector2i frameAnchor2 = res2->Base->GetFrameAnchor(maskFrame2, facingLeft2);
+
+		std::int32_t l1 = (std::int32_t)_pos.X - frameAnchor1.X, t1 = (std::int32_t)_pos.Y - frameAnchor1.Y;
+		std::int32_t l2 = (std::int32_t)other->_pos.X - frameAnchor2.X, t2 = (std::int32_t)other->_pos.Y - frameAnchor2.Y;
+		std::int32_t x1 = std::max(l1, l2), y1 = std::max(t1, t2);
+		std::int32_t x2 = std::min(l1 + frameRect1.W, l2 + frameRect2.W), y2 = std::min(t1 + frameRect1.H, t2 + frameRect2.H);
+
+		const std::uint8_t* p1 = res1->Base->Mask.get();
+		const std::uint8_t* p2 = res2->Base->Mask.get();
+		const std::int32_t stride1 = res1->Base->GetMaskStride();
+		const std::int32_t stride2 = res2->Base->GetMaskStride();
+
+		// Mask index of column `i` is `column + step * i`, mirrored frames walk the row backwards
+		const std::int32_t step1 = (facingLeft1 ? -1 : 1);
+		const std::int32_t step2 = (facingLeft2 ? -1 : 1);
+		const std::int32_t column1 = (facingLeft1 ? frameRect1.W - 1 + l1 : -l1) + frameRect1.X;
+		const std::int32_t column2 = (facingLeft2 ? frameRect2.W - 1 + l2 : -l2) + frameRect2.X;
+
+		// Whole pixels, the frames are placed at whole pixels like the original draws them
+		std::int32_t count = 0;
+		for (std::int32_t j = y1; j < y2; j++) {
+			std::int32_t index1 = ((j - t1 + frameRect1.Y) * stride1) + column1 + step1 * x1;
+			std::int32_t index2 = ((j - t2 + frameRect2.Y) * stride2) + column2 + step2 * x1;
+			for (std::int32_t i = x1; i < x2; i++, index1 += step1, index2 += step2) {
+				if (IsMaskPixelSolid(p1, index1) && IsMaskPixelSolid(p2, index2)) {
+					count++;
+					if (count >= limit) {
+						return count;
+					}
+				}
+			}
+		}
+		return count;
+	}
+
 	bool ActorBase::IsCollidingWith(const AABBf& aabb)
 	{
 		bool perPixel = (_state & ActorState::SkipPerPixelCollisions) != ActorState::SkipPerPixelCollisions;
@@ -1805,10 +2010,17 @@ namespace Jazz2::Actors
 		}
 	}
 
-	bool ActorBase::UpdateFrozenState(float timeMult)
+	void ActorBase::ApplyFrozenFriction(float timeMult)
 	{
 		constexpr float FrozenSpeedKeptPerTick = 31.0f / 32.0f;
 
+		if (GetState(ActorState::KeepsMomentumWhenFrozen)) {
+			_speed.X *= std::pow(FrozenSpeedKeptPerTick, timeMult * Player::LegacyFrameRateScale);
+		}
+	}
+
+	bool ActorBase::UpdateFrozenState(float timeMult, bool frictionApplied)
+	{
 		if (_frozenTimeLeft <= 0.0f) {
 			if (!_thawPending) {
 				return false;
@@ -1819,8 +2031,8 @@ namespace Jazz2::Actors
 		if (_frozenTimeLeft > 0.0f) {
 			// Not in HandleFrozenStateChange(), it would run between SceneNode::Transform() and BaseSprite::UpdateRenderCommand()
 			_renderer.Initialize(ActorRendererType::FrozenMask);
-			if (GetState(ActorState::KeepsMomentumWhenFrozen)) {
-				_speed.X *= std::pow(FrozenSpeedKeptPerTick, timeMult * Player::LegacyFrameRateScale);
+			if (!frictionApplied) {
+				ApplyFrozenFriction(timeMult);
 			}
 			return false;
 		}

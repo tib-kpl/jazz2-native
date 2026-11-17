@@ -51,6 +51,16 @@ namespace Jazz2
 #endif
 
 /*
+	Whether the particles of a level (see TileMap::DestructibleDebris) are handed to the backend as packed
+	32-byte records, written while they are updated, instead of float quads built when they are drawn.
+	On the Nintendo 64 the quads of one defeated enemy were 6 ms of a frame, most of it cache misses
+	(see RHI::RDP::QuadRecord and TileMap::AppendDebrisRecord()).
+*/
+#if defined(TILEMAP_USE_SINGLE_DRAW) && defined(WITH_RHI_RDP)
+#	define TILEMAP_DEBRIS_RECORDS
+#endif
+
+/*
 	Whether a tile layer's mesh holds one packed record per tile instead of the four corners of a float quad.
 
 	A record is 16 bytes where the quad is 128 bytes of vertices and 12 of indices, and the tile map writes
@@ -96,11 +106,13 @@ namespace Jazz2
 	and the GE's, which do (see `GxDevice::DispatchTileMesh()`, `PicaDevice::DispatchTileMesh()`,
 	`GsDevice::DispatchTileMesh()` and `GuDevice::DispatchTileMesh()`). On the PSP the walk and the copy of its
 	quads into the streaming buffer were a fifth of the main thread's CPU time in a castle level standing still
-	(measured in PPSSPP).
+	(measured in PPSSPP). On a Wii U console with the GX2 backend the cache cut the layer walk and draw from 2.0 to
+	0.5 ms a frame with one player, and the CPU time of a four-player frame from 14.7 to 6.3 ms; a rewritten
+	buffer the GPU still reads is renamed (see `Gx2BufferObject::PrepareCpuWrite()`).
 */
 #if defined(TILEMAP_USE_SINGLE_DRAW) && !defined(TILEMAP_GROUP_MESH_BY_TILE) && \
 	(defined(WITH_RHI_GL) || defined(WITH_RHI_D3D11) || defined(WITH_RHI_VULKAN) || defined(WITH_RHI_METAL) || \
-	 defined(WITH_RHI_GX) || defined(WITH_RHI_PICA) || defined(WITH_RHI_GS) || defined(WITH_RHI_GU))
+	 defined(WITH_RHI_GX2) || defined(WITH_RHI_GX) || defined(WITH_RHI_PICA) || defined(WITH_RHI_GS) || defined(WITH_RHI_GU))
 #	define TILEMAP_CACHE_LAYER_WINDOW
 #endif
 
@@ -571,6 +583,11 @@ namespace Jazz2::Tiles
 			/** @brief Alpha change speed */
 			float AlphaSpeed;
 
+			/** @brief Color multiplier (RGB) */
+			Vector3f Tint = Vector3f(1.0f, 1.0f, 1.0f);
+			/** @brief Color multiplier change speed, each channel is clamped to `[0, 1]` */
+			Vector3f TintSpeed;
+
 			/** @brief Time remaining until disposal */
 			float Time;
 
@@ -641,6 +658,8 @@ namespace Jazz2::Tiles
 		bool IsTileCornerEmpty(std::int32_t tx, std::int32_t ty, std::int32_t cornerX, std::int32_t cornerY);
 		/** @brief Returns `true` if the tile's collision mask is neither fully empty nor fully filled (e.g., a slope or a thin solid band) */
 		bool IsTilePartiallySolid(std::int32_t tx, std::int32_t ty);
+		/** @brief Returns `true` if the main (sprite) layer draws the pixel of the level, whatever its mask */
+		bool IsTilePixelDrawn(std::int32_t x, std::int32_t y);
 		/** @brief Returns `true` if the tile on the main (sprite) layer is controlled by a trigger (toggled solid/empty by a trigger crate) */
 		bool IsTileTrigger(std::int32_t tx, std::int32_t ty);
 		/** @brief Returns `true` if the mask of tiles on the main (sprite) layer intersecting a given AABB is empty */
@@ -768,7 +787,7 @@ namespace Jazz2::Tiles
 			thousand of them - more than the whole heap the consoles have left. Desktop targets have the memory,
 			so the effect stays unbounded there.
 		*/
-#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || \
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_GAMECUBE) || \
 		defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_AMIGAOS)
 		static constexpr std::int32_t MaxDebrisCount = 448;
 #elif defined(DEATH_TARGET_N64)
@@ -784,7 +803,7 @@ namespace Jazz2::Tiles
 			`intensity * ~190` live particles. Left alone it would sit at @ref MaxDebrisCount on its own and
 			leave nothing for a death burst, which is the effect that actually matters.
 		*/
-#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || \
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_GAMECUBE) || \
 		defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_AMIGAOS)
 		static constexpr std::int32_t MaxWeatherDebrisCount = 128;
 #elif defined(DEATH_TARGET_N64)
@@ -794,6 +813,30 @@ namespace Jazz2::Tiles
 		static constexpr std::int32_t MaxWeatherDebrisCount = 0;
 #endif
 		/**
+			@brief Step the depth of a weather particle is rounded to
+
+			The depth comes from the size of the particle, so nearly each one had a depth of its own and couldn't
+			be batched with the others. Rounded to a few levels on the consoles that budget their particles
+			(see @ref MaxWeatherDebrisCount), the weather is a few draws.
+		*/
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_N64) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_GAMECUBE) || \
+		defined(DEATH_TARGET_PSP) || defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_AMIGAOS)
+		static constexpr std::int32_t WeatherDepthStep = 40;
+#else
+		static constexpr std::int32_t WeatherDepthStep = 1;
+#endif
+		/**
+			@brief Whether the snowflakes turn as they fall
+
+			Off on the Nintendo 64: a turned particle is two triangles instead of one rectangle, about four times
+			the cost, and the turn of a few pixels isn't visible.
+		*/
+#if defined(DEATH_TARGET_N64)
+		static constexpr bool WeatherDebrisSpins = false;
+#else
+		static constexpr bool WeatherDebrisSpins = true;
+#endif
+		/**
 			@brief Maximum number of particles one @ref CreateParticleDebris() burst emits, or `0` if unbounded
 
 			The producers walk the sprite frame in fixed steps, so the count grows with the sprite's area: the
@@ -801,7 +844,7 @@ namespace Jazz2::Tiles
 			the step instead of dropping the tail keeps the burst covering the whole sprite - the particles just
 			get proportionally fewer and bigger (see @ref GetParticleDebrisStep()).
 		*/
-#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || \
+#if defined(DEATH_TARGET_DREAMCAST) || defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_WIIU) || defined(DEATH_TARGET_GAMECUBE) || \
 		defined(DEATH_TARGET_3DS) || defined(DEATH_TARGET_AMIGAOS)
 		static constexpr std::int32_t MaxParticleDebrisPerBurst = 256;
 #elif defined(DEATH_TARGET_N64)
@@ -967,6 +1010,8 @@ namespace Jazz2::Tiles
 		StringView GetLayerName(std::int32_t layerIndex) const;
 		/** @brief Returns the number of a layer in the original game (see @ref TileMapLayer::OriginalNumber), 0 if it has none */
 		std::uint8_t GetLayerOriginalNumber(std::int32_t layerIndex) const;
+		/** @brief Returns the depth of the nearest visible layer in front of a layer, `0` if there is none */
+		std::uint16_t GetDepthInFrontOfLayer(std::int32_t layerIndex) const;
 		/** @brief Sets the name and the number in the original game of a layer, which only scripts use */
 		void SetLayerIdentity(std::int32_t layerIndex, StringView name, std::uint8_t originalNumber);
 		/**
@@ -1234,6 +1279,22 @@ namespace Jazz2::Tiles
 
 		SmallVector<DebrisMeshGroup, 4> _debrisMeshGroups;
 
+#	if defined(TILEMAP_DEBRIS_RECORDS)
+		/// Records of the particles that share a draw (see @ref DebrisMeshGroup), rebuilt by every
+		/// @ref UpdateDebris(). An empty group keeps its buffer for reuse.
+		struct DebrisRecordGroup
+		{
+			Texture* DiffuseTexture;
+			std::int32_t PaletteOffset;
+			std::uint16_t Depth;
+			bool AdditiveBlending;
+			Vector2i TextureSize;
+			SmallVector<float, 0> Records;
+		};
+
+		SmallVector<DebrisRecordGroup, 0> _debrisRecordGroups;
+#	endif
+
 #	if defined(TILEMAP_GROUP_MESH_BY_TILE)
 		/// One visible tile of the layer currently being built, held back so the layer can be emitted grouped by
 		/// the atlas slot its tiles sample instead of in screen order (see @ref DrawLayer()). Everything the
@@ -1455,6 +1516,10 @@ namespace Jazz2::Tiles
 		// Appends one particle's two triangles in the same layout, with its rotation, scale and frame offset already
 		// folded into the four corners - the quad the sprite shader would have synthesized from its model matrix
 		static void AppendDebrisQuad(SmallVector<float, 0>& vertices, const DestructibleDebris& debris);
+#	if defined(TILEMAP_DEBRIS_RECORDS)
+		// Appends the packed record of one particle to the group it draws with
+		void AppendDebrisRecord(const DestructibleDebris& debris);
+#	endif
 		// Rents a mesh vertex buffer from the per-frame pool and returns its index (the pool can reallocate, so
 		// callers hold indices rather than pointers)
 		std::int32_t RentMeshVertices();

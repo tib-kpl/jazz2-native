@@ -277,7 +277,9 @@ namespace Jazz2::Rendering
 		const float viewWaterLevel = (_owner->_levelHandler->_waterLevel - _owner->_cameraPos.Y) * _owner->_cameraScale + _bounds.H * 0.5f;
 		const bool viewHasWater = (viewWaterLevel < _bounds.H && !_owner->_levelHandler->_waterHidden);
 		const bool waterProgramReady = (_owner->_levelHandler->_combineWithWaterShader != nullptr);
-		auto& command = (viewHasWater && waterProgramReady ? _renderCommandWithWater : _renderCommand);
+		// The water drawn mid-scene (see PlayerViewport::DrawWater()) leaves only the darkness above it to the plain Combine
+		const bool waterInScene = _owner->IsWaterInScene();
+		auto& command = (viewHasWater && !waterInScene && waterProgramReady ? _renderCommandWithWater : _renderCommand);
 
 		// The block reads the viewport rectangle off its own quad (quad_origin/quad_axis_*), so the instance
 		// block has to describe it here exactly as the shader path does - it is the only source those have
@@ -287,14 +289,15 @@ namespace Jazz2::Rendering
 			instanceBlock->GetUniform(Material::SpriteSizeUniformName)->SetFloatValue(_bounds.W, _bounds.H);
 			instanceBlock->GetUniform(Material::ColorUniformName)->SetFloatVector(Colorf::White.Data());
 		}
+		// The plain Combine has the darkness above deep water too, a waterline below the view leaves it out
+		auto* waterLevelUniform = command.GetMaterial().Uniform("uWaterLevel");
+		if (waterLevelUniform != nullptr) {
+			waterLevelUniform->SetFloatValue(viewHasWater ? viewWaterLevel / _bounds.H : 1.0f);
+		}
 		if (viewHasWater) {
 			// Read back by NAME on the console tiers (uniform_float(uWaterLevel) / uniform_vec4(uAmbientColor)),
 			// so the water description consumes the shader's own uniforms instead of the fixed-function
 			// language growing a facility per game concept. Same values the shader path's fragment stage reads.
-			auto* waterLevelUniform = command.GetMaterial().Uniform("uWaterLevel");
-			if (waterLevelUniform != nullptr) {
-				waterLevelUniform->SetFloatValue(viewWaterLevel / _bounds.H);
-			}
 			auto* ambientUniform = command.GetMaterial().Uniform("uAmbientColor");
 			if (ambientUniform != nullptr) {
 				ambientUniform->SetFloatVector(_owner->_ambientLight.Data());
@@ -315,7 +318,9 @@ namespace Jazz2::Rendering
 #else
 		float viewWaterLevel = (_owner->_levelHandler->_waterLevel - _owner->_cameraPos.Y) * _owner->_cameraScale + _bounds.H * 0.5f;
 		bool viewHasWater = (viewWaterLevel < _bounds.H && !_owner->_levelHandler->_waterHidden);
-		auto& command = (viewHasWater ? _renderCommandWithWater : _renderCommand);
+		// The water drawn mid-scene (see PlayerViewport::DrawWater()) leaves only the darkness above it to the plain Combine
+		const bool waterInScene = (viewHasWater && _owner->IsWaterInScene());
+		auto& command = (viewHasWater && !waterInScene ? _renderCommandWithWater : _renderCommand);
 
 		command.GetMaterial().SetTexture(0, *_owner->_viewTexture);
 		command.GetMaterial().SetTexture(1, *_owner->_lightingBuffer);
@@ -330,11 +335,16 @@ namespace Jazz2::Rendering
 			command.GetMaterial().SetTexture(2, *_owner->_viewTexture);
 			command.GetMaterial().SetTexture(3, *_owner->_viewTexture);
 		}
-		if (viewHasWater && !PreferencesCache::LowWaterQuality) {
+		if (viewHasWater && !waterInScene && !PreferencesCache::LowWaterQuality) {
 			command.GetMaterial().SetTexture(4, *_owner->_levelHandler->_noiseTexture);
 		}
 
 		auto* instanceBlock = command.GetMaterial().UniformBlock(Material::InstanceBlockName);
+		if DEATH_UNLIKELY(instanceBlock == nullptr) {
+			// The program failed to link (a driver rejected it), so none of its uniforms exist - skip the pass
+			// rather than dereference them every frame
+			return false;
+		}
 		instanceBlock->GetUniform(Material::TexRectUniformName)->SetFloatValue(1.0f, 0.0f, 1.0f, 0.0f);
 		instanceBlock->GetUniform(Material::SpriteSizeUniformName)->SetFloatValue(_bounds.W, _bounds.H);
 		instanceBlock->GetUniform(Material::ColorUniformName)->SetFloatVector(Colorf::White.Data());
@@ -342,17 +352,24 @@ namespace Jazz2::Rendering
 		command.GetMaterial().Uniform("uAmbientColor")->SetFloatVector(_owner->_ambientLight.Data());
 		command.GetMaterial().Uniform("uTime")->SetFloatValue(_owner->_levelHandler->_elapsedFrames * 0.0018f);
 
-		if (viewHasWater) {
-			command.GetMaterial().Uniform("uWaterLevel")->SetFloatValue(viewWaterLevel / _bounds.H);
-			command.GetMaterial().Uniform("uCameraPos")->SetFloatValue(_owner->_cameraPos.X * _owner->_cameraScale, _owner->_cameraPos.Y * _owner->_cameraScale);
-			// A program built before the colors were added has none of them (the table of the RSX)
+		if (&command == &_renderCommand) {
+			command.GetMaterial().Uniform("uWaterLevel")->SetFloatValue(waterInScene ? viewWaterLevel / _bounds.H : 1.0f);
+			if (waterInScene) {
+				command.GetMaterial().Uniform("uWavePhase")->SetFloatVector(_owner->GetWaterView().WavePhase.Data());
+			}
+		} else if (viewHasWater) {
+			const PlayerViewport::WaterView water = _owner->GetWaterView();
 			const Vector3f& top = _owner->_levelHandler->_waterColorTop;
 			const Vector3f& bottom = _owner->_levelHandler->_waterColorBottom;
-			if (auto* uniform = command.GetMaterial().Uniform("uWaterColorTop")) {
-				uniform->SetFloatValue(top.X, top.Y, top.Z, 1.0f);
-			}
-			if (auto* uniform = command.GetMaterial().Uniform("uWaterColorBottom")) {
-				uniform->SetFloatValue(bottom.X, bottom.Y, bottom.Z, 1.0f);
+			command.GetMaterial().Uniform("uWaterLevel")->SetFloatValue(viewWaterLevel / _bounds.H);
+			command.GetMaterial().Uniform("uCameraPos")->SetFloatValue(water.CameraPos.X, water.CameraPos.Y);
+			command.GetMaterial().Uniform("uWavePhase")->SetFloatVector(water.WavePhase.Data());
+			command.GetMaterial().Uniform("uWaterBase")->SetFloatVector(water.Base.Data());
+			command.GetMaterial().Uniform("uWaterColorTop")->SetFloatValue(top.X, top.Y, top.Z, 1.0f);
+			command.GetMaterial().Uniform("uWaterColorBottom")->SetFloatValue(bottom.X, bottom.Y, bottom.Z, 1.0f);
+			// Only the high quality one has the light rays
+			if (auto* uniform = command.GetMaterial().Uniform("uRaysBase")) {
+				uniform->SetFloatValue(water.RaysBase);
 			}
 		}
 
@@ -371,7 +388,10 @@ namespace Jazz2::Rendering
 		// pixels from the top edge (it may be negative when the whole view is underwater), together with the
 		// shader's uTime and the camera Y that anchor the wave animation to the world.
 		const float viewWaterLevel = (_owner->_levelHandler->_waterLevel - _owner->_cameraPos.Y) * _owner->_cameraScale + _bounds.H * 0.5f;
-		const bool viewHasWater = (viewWaterLevel < _bounds.H && !_owner->_levelHandler->_waterHidden);
+		// The water drawn mid-scene leaves only the darkness above it, once the waterline is in the top 40% of the view
+		const bool waterInScene = _owner->IsWaterInScene();
+		const bool viewHasWater = (viewWaterLevel < _bounds.H && !_owner->_levelHandler->_waterHidden &&
+			(!waterInScene || viewWaterLevel < 0.4f * _bounds.H));
 		const float waterTime = _owner->_levelHandler->_elapsedFrames * 0.0018f;
 
 		// Collect every active light emitter, exactly like the shader-path LightingRenderer does
@@ -386,7 +406,9 @@ namespace Jazz2::Rendering
 		// ambient colour by (1 - light.r). A fully-lit level with no lights therefore leaves the scene
 		// untouched, so it can be skipped entirely - this keeps normal levels at full speed. With water in
 		// view the combine must still run (a fully-lit water level still tints), just without a lightmap.
-		const float ambientLevel = _owner->_ambientLight.W;
+		const Vector2f ambientChannels = PlayerViewport::GetAmbientLightChannels(_owner->_ambientLight.W);
+		const float ambientLevel = ambientChannels.X;
+		const float ambientBrightness = ambientChannels.Y;
 		const float ambR = _owner->_ambientLight.X;
 		const float ambG = _owner->_ambientLight.Y;
 		const float ambB = _owner->_ambientLight.Z;
@@ -397,7 +419,7 @@ namespace Jazz2::Rendering
 		// paid for with a map reset, the splats and the conversion every frame
 		const bool fullyLit = (ambientLevel >= 0.999f);
 #else
-		const bool fullyLit = (ambientLevel >= 0.999f && _swLightsCache.empty());
+		const bool fullyLit = (ambientLevel >= 0.999f && ambientBrightness <= 0.0f && _swLightsCache.empty());
 #endif
 		if (fullyLit && !viewHasWater) {
 			return false;
@@ -417,7 +439,11 @@ namespace Jazz2::Rendering
 		if (fullyLit) {
 			// Water-only combine: no lightmap is needed, the device applies just the per-row water effect
 			RHI::Device::SetPendingSoftwareLighting(nullptr, 0, 0, 1, vpX, vpY, vpW, vpH, ambR, ambG, ambB,
-				true, viewWaterLevel, waterTime, _owner->_cameraPos.Y * _owner->_cameraScale);
+				true, viewWaterLevel, waterTime, _owner->_cameraPos.Y * _owner->_cameraScale
+#	if defined(WITH_RHI_SOFTWARE)
+				, waterInScene
+#	endif
+			);
 			return true;
 		}
 
@@ -460,12 +486,21 @@ namespace Jazz2::Rendering
 		// in local memory, which the texture cache is short of: 128x128 PSMT8 is two pages and 16 KB a frame
 		// across the bus, where the quarter took four pages and 32 KB (and half resolution would take 16).
 		constexpr std::int32_t Scale = 6;
-#elif defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE) || defined(DEATH_TARGET_DREAMCAST)
+#elif defined(DEATH_TARGET_DREAMCAST)
+		// An eighth (80x60 texels for 640x480). At a quarter the map took 13 ms in the torch-lit levels, which
+		// ran at 21 to 27 ms a frame; the cost follows the texel count. The map is stretched with bilinear
+		// filtering and a light falls off over 8 or more texels, so nothing sharp is lost.
+		constexpr std::int32_t Scale = 8;
+#elif defined(DEATH_TARGET_WII) || defined(DEATH_TARGET_GAMECUBE)
 		// The consoles pay for every texel twice on the CPU - once resetting and splatting it here, once
 		// converting it into a texture in the device - and that pair of passes was the single largest cost
 		// left in the frame. Quarter resolution trades a slightly softer light edge for a quarter of the
 		// work; the map is stretched over the viewport with bilinear filtering either way, and the lights
 		// themselves are smooth cubic falloffs with nothing sharp to lose.
+		constexpr std::int32_t Scale = 4;
+#elif defined(RHI_SOFTWARE_REDUCED_DETAIL)
+		// Reduced detail of the software renderer (see NCINE_RHI_SOFTWARE_REDUCED_DETAIL): a quarter of the
+		// texels. Its combine samples the map point-wise, so lights show the coarser texels as steps.
 		constexpr std::int32_t Scale = 4;
 #else
 		constexpr std::int32_t Scale = 2;
@@ -481,8 +516,10 @@ namespace Jazz2::Rendering
 		// keeps its size and the ambient level, only the spans they did reach are reset again. A light covers a
 		// fraction of the viewport, and the full pass rewrote every texel of the map each frame - as much work as
 		// the splats, and on the consoles a whole buffer's worth of cache lines on top.
+		// G starts at the brightness of light above full (see PlayerViewport::GetAmbientLightChannels()), which is only
+		// ever there with the ambient level at full, so the level alone still tells the reset apart
 		const bool resetLitSpansOnly = (_swLitWidth == lmW && _swLitSpans.size() == std::size_t(lmH) * 2 &&
-			_swLitAmbient == ambientLevel);
+			_swLitAmbient == ambientLevel + ambientBrightness);
 		_swLightmap.resize_for_overwrite(texelCount * 2);
 		float* DEATH_RESTRICT lightmap = _swLightmap.data();
 		if (resetLitSpansOnly) {
@@ -490,17 +527,17 @@ namespace Jazz2::Rendering
 				float* DEATH_RESTRICT row = lightmap + (std::size_t)y * lmW * 2;
 				for (std::int32_t x = _swLitSpans[y * 2]; x <= _swLitSpans[y * 2 + 1]; x++) {
 					row[x * 2] = ambientLevel;
-					row[x * 2 + 1] = 0.0f;
+					row[x * 2 + 1] = ambientBrightness;
 				}
 			}
 		} else {
 			for (std::size_t i = 0; i < texelCount; i++) {
 				lightmap[i * 2] = ambientLevel;
-				lightmap[i * 2 + 1] = 0.0f;
+				lightmap[i * 2 + 1] = ambientBrightness;
 			}
 			_swLitSpans.resize_for_overwrite(std::size_t(lmH) * 2);
 			_swLitWidth = lmW;
-			_swLitAmbient = ambientLevel;
+			_swLitAmbient = ambientLevel + ambientBrightness;
 		}
 		for (std::int32_t y = 0; y < lmH; y++) {
 			_swLitSpans[y * 2] = lmW;
@@ -701,7 +738,11 @@ namespace Jazz2::Rendering
 		// outlive this call: _swLightmap is a member reused across frames, and the device consumes the entry in
 		// the same frame's Draw phase (before the next PrepareSoftwareLighting reassigns it).
 		RHI::Device::SetPendingSoftwareLighting(_swLightmap.data(), lmW, lmH, Scale, vpX, vpY, vpW, vpH, ambR, ambG, ambB,
-			viewHasWater, viewWaterLevel, waterTime, _owner->_cameraPos.Y * _owner->_cameraScale);
+			viewHasWater, viewWaterLevel, waterTime, _owner->_cameraPos.Y * _owner->_cameraScale
+#	if defined(WITH_RHI_SOFTWARE)
+			, waterInScene
+#	endif
+		);
 #if defined(RHI_LIGHTING_LIT_SPANS)
 		// Outside the spans the lights reached this frame every texel holds exactly the reset value, which a device
 		// that keeps its converted lightmap between frames does not have to convert again (see RhiFwd.h)

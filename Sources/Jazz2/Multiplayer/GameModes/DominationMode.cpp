@@ -4,10 +4,12 @@
 
 #include "../ServerInitialization.h"
 #include "../../Actors/Player.h"
+#include "../../UI/Font.h"
 #include "../../../nCine/I18n.h"
 #include "../../../nCine/Base/Algorithms.h"
 #include "../../../nCine/Base/FrameTimer.h"
 
+#include <float.h>
 #include <cstring>
 
 namespace Jazz2::Multiplayer::GameModes
@@ -82,12 +84,13 @@ namespace Jazz2::Multiplayer::GameModes
 			point.CapturingTeam = GameModeObject::NeutralTeam;
 			point.CaptureFrames = 0.0f;
 			point.ScoreFrames = 0.0f;
-			// "Control Point N" unless a Text event names it
-			point.Name = (!info.Name.empty() ? info.Name : _f("Control Point {}", (std::int32_t)_points.size()));
+			// Empty unless a Text event names it, clients then show "Control Point N" in their own language
+			point.Name = info.Name;
 
 			GameModeObject& obj = AddObject(ctx, GameModeObjectType::ControlPoint, GameModeObject::NeutralTeam, info.Pos);
 			obj.Direction = (std::int8_t)info.Direction;
-			obj.Name = point.Name;
+			// Scripts compare the names, so it must not depend on the language of the server
+			obj.Name = (!point.Name.empty() ? point.Name : Death::format("Control Point {}", (std::int32_t)_points.size()));
 			point.ObjectId = obj.Id;
 		}
 
@@ -129,8 +132,11 @@ namespace Jazz2::Multiplayer::GameModes
 						point.CapturingTeam = GameModeObject::NeutralTeam;
 						point.CaptureFrames = 0.0f;
 						point.ScoreFrames = 0.0f;
-						// TRANSLATORS: Message shown to all players in Domination when a team captured a control point, first {} is the team color name in English (Blue, Red, Green or Yellow), second {} is the name of the control point, keep the leading line breaks
-						ctx.ShowAlertToAllPlayers(_f("\n\n{} team captured {}!", GetTeamName(point.Team), point.Name));
+						if (!point.Name.empty()) {
+							ctx.ShowAlertToAllPlayers(ServerMessage(ServerMessageType::ControlPointCaptured, ServerMessageTeam{point.Team}, point.Name));
+						} else {
+							ctx.ShowAlertToAllPlayers(ServerMessage(ServerMessageType::ControlPointCapturedUnnamed, ServerMessageTeam{point.Team}, (std::int32_t)(i + 1)));
+						}
 						objectsChanged = true;
 					}
 				}
@@ -194,7 +200,29 @@ namespace Jazz2::Multiplayer::GameModes
 
 	void DominationMode::OnDrawHUD(IGameModeContext& ctx, IGameModeHUD& hud, Actors::Player* player, const Rectf& view)
 	{
-		DrawScoreLine(ctx, hud, view, _("Roasts"), ctx.GetPlayerState(player).Kills, false);
+		// The control points in their order under the team scores, "o" in the color of the team that holds it, "x" while neutral
+		std::int32_t pointCount = 0;
+		for (const auto& obj : ctx.GetGameModeObjects()) {
+			if (obj.Type == GameModeObjectType::ControlPoint) {
+				pointCount++;
+			}
+		}
+		if (pointCount > 0) {
+			constexpr float Spacing = 10.0f;
+			float x = view.X + view.W * 0.5f - Spacing * (pointCount - 1) * 0.5f;
+			float y = view.Y + 26.0f;
+			// TRANSLATORS: Label of the control points in the HUD in Domination, short for "control points"
+			hud.DrawHudText(GameModeFontType::Small, _("CPs:"), x - 8.0f, y, 1.0f, UI::Alignment::TopRight, UI::Font::DefaultColor, 0.7f, 0.88f);
+			for (const auto& obj : ctx.GetGameModeObjects()) {
+				if (obj.Type != GameModeObjectType::ControlPoint) {
+					continue;
+				}
+				bool held = (obj.Team != GameModeObject::NeutralTeam);
+				hud.DrawHudText(GameModeFontType::Small, held ? "o"_s : "x"_s, x, y, 1.0f, UI::Alignment::Top,
+					held ? GetTeamColor(obj.Team) : Colorf(0.46f, 0.46f, 0.46f, 0.5f), 0.7f, 0.88f);
+				x += Spacing;
+			}
+		}
 
 		// The arrow points to the nearest point the team doesn't hold, or to the nearest one if it holds all,
 		// transparent white for a neutral one (the objects are synchronized, so this works on clients too)

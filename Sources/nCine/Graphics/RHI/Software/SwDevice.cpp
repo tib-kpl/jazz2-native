@@ -24,6 +24,168 @@ namespace nCine::RHI::Software
 {
 	namespace
 	{
+		/*
+			Row forms of generated fragment shaders (see SpanShaderInput).
+
+			The textured background of a level is a quad the size of the view whose shader depends mostly on the
+			row: depth, fade and texture row are the same along it, only the texel column changes. The generated
+			fragment worked all of that out for every pixel, 17 ms of a 20 ms frame at 720x405.
+
+			The row form evaluates the same expressions in the same order, the row's part once, so its output is
+			byte-identical (a debug build compares every span). A run of pixels on one texel is shaded once. A
+			texture with no fast case (not 4 bytes a texel, or with a swizzle) goes through the fragment.
+		*/
+		struct ByteToUnit
+		{
+			float Values[256];
+			ByteToUnit() {
+				for (std::int32_t i = 0; i < 256; i++) {
+					// Verbatim division, see sw::swTexture()
+					Values[i] = i / 255.0f;
+				}
+			}
+		};
+		const ByteToUnit byteToUnit;
+
+		inline std::uint8_t QuantizeUnit(float v)
+		{
+			// sw::packColor()'s quantization
+			v = (v < 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
+			const std::int32_t i = static_cast<std::int32_t>(v * 255.0f + 0.5f);
+			return static_cast<std::uint8_t>((i < 0) ? 0 : (i > 255 ? 255 : i));
+		}
+
+		template<class Uniforms, FragmentShaderFn Fragment>
+		void TexturedBackgroundSpan(const SpanShaderInput& in)
+		{
+			using namespace sw;
+			const SwTexture* tex = in.textures[0];
+			const std::uint8_t* pixels = (tex != nullptr ? tex->GetPixels(0) : nullptr);
+			const SwizzleChannel* swizzle = (tex != nullptr ? tex->GetSwizzle() : nullptr);
+			const bool direct = (pixels != nullptr && tex->GetWidth() > 0 && tex->GetHeight() > 0 && tex->GetBytesPerPixel() == 4 &&
+				swizzle[0] == SwizzleChannel::Red && swizzle[1] == SwizzleChannel::Green &&
+				swizzle[2] == SwizzleChannel::Blue && swizzle[3] == SwizzleChannel::Alpha);
+			if DEATH_UNLIKELY(!direct) {
+				FragmentShaderInput fsInput;
+				fsInput.v = in.v;
+				fsInput.y = in.y;
+				fsInput.texWidth = in.texWidth;
+				fsInput.texHeight = in.texHeight;
+				fsInput.textures = in.textures;
+				fsInput.color = in.color;
+				fsInput.userData = in.userData;
+				std::int32_t txFix = in.txBase;
+				for (std::int32_t i = 0; i < in.count; i++, txFix += in.dtxFix) {
+					fsInput.rgba = &in.rgba[i * 4];
+					fsInput.u = txFix / 65536.0f * in.invTexWidth;
+					fsInput.x = in.x + i;
+					Fragment(fsInput);
+				}
+				return;
+			}
+
+			// A copy, so that nothing written to the pixels can be taken for a change of the uniforms
+			const Uniforms unis = *static_cast<const Uniforms*>(in.userData);
+			const float opacity = in.color[3];
+
+			// legacyWarp() of TexturedBackground.shader as generated, the terms of the row
+			const float horizonY = clamp(0.5f + unis.uHorizonOffset.y, 0.0f, 1.0f);
+			const float aboveHorizon = in.v <= horizonY ? 1.0f : 0.0f;
+			const float fromHorizon = aboveHorizon > 0.5f ? (horizonY - in.v) / max(horizonY, 0.0001f) : (in.v - horizonY) / max(1.0f - horizonY, 0.0001f);
+			const float distance = 1.3f - fromHorizon;
+			const float horizonDepth = distance;
+			const float correction = unis.uViewSize.x * 9.0f / (unis.uViewSize.y * 16.0f);
+			const float shiftX = unis.uShift.x / 256.0f;
+			const float depthScale = 0.5f + 1.5f * horizonDepth;
+			const float texturePosY = unis.uShift.y / 256.0f + (2.0f * aboveHorizon - 1.0f) * 0.5f * (1.0f - fromHorizon) * 1.4f * distance;
+			const float horizonOpacity = clamp(distance * distance - 0.3f, 0.0f, 1.0f);
+			// fragment(): mix(texColor, horizonColor, t) is texColor * (1 - t) + horizonColor * t
+			const float t = horizonOpacity * (1.0f - unis.uHorizonOffset.z);
+			const float texelWeight = 1.0f - t;
+			const float horizonR = unis.uHorizonColor.x * t, horizonG = unis.uHorizonColor.y * t, horizonB = unis.uHorizonColor.z * t;
+			const std::uint8_t alpha = QuantizeUnit(opacity);
+
+			// swTexture(): the row of the texture is the same along the span
+			const std::int32_t width = tex->GetWidth(), height = tex->GetHeight();
+			const float widthF = static_cast<float>(width);
+			const SamplerWrapping wrapS = tex->GetWrapS();
+			// The sky repeats, so most columns wrap, through a division per pixel in wrapTexel(). For a width
+			// that is a power of two the wrapped column is its low bits.
+			const bool maskS = (wrapS == SamplerWrapping::Repeat && (width & (width - 1)) == 0);
+			const std::int32_t widthMask = width - 1;
+			const std::int32_t ty = detail::wrapTexel(detail::floorToInt(texturePosY * static_cast<float>(height)), height, tex->GetWrapT());
+			const std::uint8_t* texRow = pixels + static_cast<std::size_t>(ty) * static_cast<std::size_t>(tex->GetStrideBytes());
+			const float* unit = byteToUnit.Values;
+
+			std::uint8_t* out = in.rgba;
+			std::int32_t txFix = in.txBase;
+			std::int32_t lastTx = INT32_MIN;
+			std::uint32_t lastPixel = 0;
+			for (std::int32_t i = 0; i < in.count; i++, txFix += in.dtxFix, out += 4) {
+#if defined(RHI_SOFTWARE_REDUCED_DETAIL)
+				// With the detail reduced a pixel in an odd screen column takes the color of the one to its left.
+				// It goes by the column on the screen, not in the span, so the tiles agree where they meet.
+				const std::int32_t source = i - ((in.x + i) & 1);
+				if (source != i && i != 0) {
+					std::memcpy(out, &lastPixel, sizeof(lastPixel));
+					continue;
+				}
+				const float u = (in.txBase + source * in.dtxFix) / 65536.0f * in.invTexWidth;
+#else
+				const float u = txFix / 65536.0f * in.invTexWidth;
+#endif
+				const float texturePosX = shiftX + (u - 0.5f - unis.uHorizonOffset.x) * depthScale * correction;
+				const std::int32_t column = detail::floorToInt(texturePosX * widthF);
+				const std::int32_t tx = (maskS ? (column & widthMask) : detail::wrapTexel(column, width, wrapS));
+				if (tx != lastTx) {
+					lastTx = tx;
+					const std::uint8_t* texel = texRow + static_cast<std::size_t>(tx) * 4;
+					std::uint8_t pixel[4];
+					pixel[0] = QuantizeUnit((unit[texel[0]] * texelWeight + horizonR) * opacity);
+					pixel[1] = QuantizeUnit((unit[texel[1]] * texelWeight + horizonG) * opacity);
+					pixel[2] = QuantizeUnit((unit[texel[2]] * texelWeight + horizonB) * opacity);
+					pixel[3] = alpha;
+					std::memcpy(&lastPixel, pixel, sizeof(lastPixel));
+				}
+				std::memcpy(out, &lastPixel, sizeof(lastPixel));
+			}
+
+#if defined(DEATH_DEBUG) && !defined(RHI_SOFTWARE_REDUCED_DETAIL)
+			// The fragment this stands for has to agree on every byte
+			{
+				FragmentShaderInput fsInput;
+				fsInput.v = in.v;
+				fsInput.y = in.y;
+				fsInput.texWidth = in.texWidth;
+				fsInput.texHeight = in.texHeight;
+				fsInput.textures = in.textures;
+				fsInput.color = in.color;
+				fsInput.userData = in.userData;
+				std::int32_t checkFix = in.txBase;
+				for (std::int32_t i = 0; i < in.count; i++, checkFix += in.dtxFix) {
+					std::uint8_t expected[4] = {};
+					fsInput.rgba = expected;
+					fsInput.u = checkFix / 65536.0f * in.invTexWidth;
+					fsInput.x = in.x + i;
+					Fragment(fsInput);
+					DEATH_DEBUG_ASSERT(std::memcmp(expected, &in.rgba[i * 4], 4) == 0, "A row form of a shader differs from its fragment", );
+				}
+			}
+#endif
+		}
+
+		// Returns the row form of a generated fragment shader, or `nullptr` if it has none
+		SpanShaderFn FindSpanShader(FragmentShaderFn fragment)
+		{
+			if (fragment == &TexturedBackground_Fragment) {
+				return &TexturedBackgroundSpan<TexturedBackground_Uniforms, &TexturedBackground_Fragment>;
+			}
+			if (fragment == &TexturedBackground_DITHER_Fragment) {
+				return &TexturedBackgroundSpan<TexturedBackground_DITHER_Uniforms, &TexturedBackground_DITHER_Fragment>;
+			}
+			return nullptr;
+		}
+
 		// The DefaultSprite / DefaultBatchedSprites instance layout is a hard contract of the shader family
 		// (std140 offsets within the InstanceBlock / each batched Instance), so the effect reads members
 		// at these fixed byte offsets instead of chasing per-member reflection (the batched reflection only
@@ -130,6 +292,7 @@ namespace nCine::RHI::Software
 	std::int32_t SwDevice::_defaultFbStride = 0;
 	std::vector<std::uint8_t> SwDevice::_screenPixels;
 	std::vector<SwDevice::PendingSoftwareLight> SwDevice::_pendingSoftwareLights;
+	std::vector<SwDevice::PendingSoftwareLight> SwDevice::_pendingSoftwareWater;
 
 	void SwDevice::SetBlendingEnabled(bool enabled)
 	{
@@ -428,11 +591,29 @@ namespace nCine::RHI::Software
 			}
 			_pendingSoftwareLights.clear();
 		}
+		// The water of a scene that wasn't drawn (or whose draw was culled) is simply dropped
+		_pendingSoftwareWater.clear();
+	}
+
+	void SwDevice::SetPendingSoftwareWater(std::int32_t vpX, std::int32_t vpY, std::int32_t vpW, std::int32_t vpH,
+		float waterLevelPx, float waterTime, float waterCamY)
+	{
+		PendingSoftwareLight entry;
+		entry.VpX = vpX;
+		entry.VpY = vpY;
+		entry.VpW = vpW;
+		entry.VpH = vpH;
+		entry.WaterActive = true;
+		entry.WaterInScene = true;
+		entry.WaterLevelPx = waterLevelPx;
+		entry.WaterTime = waterTime;
+		entry.WaterCamY = waterCamY;
+		_pendingSoftwareWater.push_back(entry);
 	}
 
 	void SwDevice::SetPendingSoftwareLighting(const float* lightmap, std::int32_t lmW, std::int32_t lmH, std::int32_t scale,
 		std::int32_t vpX, std::int32_t vpY, std::int32_t vpW, std::int32_t vpH, float ambR, float ambG, float ambB,
-		bool waterActive, float waterLevelPx, float waterTime, float waterCamY)
+		bool waterActive, float waterLevelPx, float waterTime, float waterCamY, bool waterInScene)
 	{
 		PendingSoftwareLight entry;
 		entry.Lightmap = lightmap;
@@ -447,6 +628,7 @@ namespace nCine::RHI::Software
 		entry.AmbG = ambG;
 		entry.AmbB = ambB;
 		entry.WaterActive = waterActive;
+		entry.WaterInScene = waterInScene;
 		entry.WaterLevelPx = waterLevelPx;
 		entry.WaterTime = waterTime;
 		entry.WaterCamY = waterCamY;
@@ -486,6 +668,38 @@ namespace nCine::RHI::Software
 				std::memcpy(row + (std::size_t)x * 4, edge, 4);
 			}
 		}
+	}
+
+	// The water of one row below the waterline, counted bottom-up inside the viewport (see ApplyPendingSoftwareLighting())
+	static void ApplyUnderwaterRow(std::uint8_t* px, std::int32_t vpW, std::int32_t y, float waterRowLimit, float invVpH,
+		float waveAmplitudePx, float wavePhaseBase, float wavePhasePerRow)
+	{
+		constexpr float WaterColorR = 0.4f, WaterColorG = 0.6f, WaterColorB = 0.8f;
+
+		// Horizontal wave displacement, constant per row
+		const float phase = wavePhaseBase + wavePhasePerRow * (float)y;
+		const std::int32_t shift = (std::int32_t)std::lround(waveAmplitudePx * sinApprox(phase));
+		ShiftRowHorizontal(px, vpW, shift);
+
+		// Water tint + surface glow folded into one constant blend: out = main * 0.6 * (1 - glow) +
+		// (waterColor * 0.4 * (1 - glow) + glow). Solving out = mix(main, src, a) for the blend kernel
+		// gives a = 0.4 + 0.6 * glow and src = (waterColor * 0.4 * (1 - glow) + glow) / a, with src
+		// always inside [0, 1] because it is a convex combination of waterColor and white.
+		const float topDist = (waterRowLimit - (float)y) * invVpH;
+		const float topGradient = std::max(1.0f - topDist, 0.0f);
+		float glow = 0.2f * topGradient * topGradient;
+		if (waterRowLimit - (float)y < 1.0f) {
+			glow += 0.2f;	// The waterline row itself gets an extra highlight
+		}
+		const float a = 0.4f + 0.6f * glow;
+		const float tintScale = 0.4f * (1.0f - glow) / a;
+		const float glowTerm = glow / a;
+		std::uint8_t tintBlend[4];
+		tintBlend[0] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorR * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
+		tintBlend[1] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorG * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
+		tintBlend[2] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorB * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
+		tintBlend[3] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)(a * 255.0f + 0.5f), 1, 254);
+		BlendScanlineConstSrcAlpha(px, vpW, tintBlend);
 	}
 
 #if defined(RHI_USE_FB16)
@@ -569,7 +783,6 @@ namespace nCine::RHI::Software
 				aboveWaterBlend[3] = (std::uint8_t)std::clamp<std::int32_t>(a, 0, 254);
 			}
 		}
-		constexpr float WaterColorR = 0.4f, WaterColorG = 0.6f, WaterColorB = 0.8f;
 
 		// In-place combine over the viewport region, matching the core of Combine(WithWater).shader with the
 		// (heavy, blur-dependent) grayscale night-vision term dropped:
@@ -581,6 +794,7 @@ namespace nCine::RHI::Software
 		// buffer, so a negative Brightness stays a no-op instead of becoming a "black light"), and a fully lit
 		// texel leaves the scene pixel as-is. The row cores are the CPU-dispatched SIMD kernels (the lighting one
 		// bit-identical to the scalar loop it replaced, see SwScanlineOps.h).
+		std::int32_t activeFirst = 0, activeLast = -1;
 		for (std::int32_t y = 0; y < vpH; y++) {
 			const std::size_t fbRow = (std::size_t)(vpY + vpH - 1 - y);
 			std::uint8_t* px;
@@ -595,37 +809,42 @@ namespace nCine::RHI::Software
 #endif
 
 			const bool isUnderwaterRow = (hasWater && y < belowEndExcl);
-			if (isUnderwaterRow) {
-				// Horizontal wave displacement, constant per row
-				const float phase = wavePhaseBase + wavePhasePerRow * (float)y;
-				const std::int32_t shift = (std::int32_t)std::lround(waveAmplitudePx * sinApprox(phase));
-				ShiftRowHorizontal(px, vpW, shift);
-
-				// Water tint + surface glow folded into one constant blend: out = main * 0.6 * (1 - glow) +
-				// (waterColor * 0.4 * (1 - glow) + glow). Solving out = mix(main, src, a) for the blend kernel
-				// gives a = 0.4 + 0.6 * glow and src = (waterColor * 0.4 * (1 - glow) + glow) / a, with src
-				// always inside [0, 1] because it is a convex combination of waterColor and white.
-				const float topDist = (waterRowLimit - (float)y) * invVpH;
-				const float topGradient = std::max(1.0f - topDist, 0.0f);
-				float glow = 0.2f * topGradient * topGradient;
-				if (waterRowLimit - (float)y < 1.0f) {
-					glow += 0.2f;	// The waterline row itself gets an extra highlight
-				}
-				const float a = 0.4f + 0.6f * glow;
-				const float tintScale = 0.4f * (1.0f - glow) / a;
-				const float glowTerm = glow / a;
-				std::uint8_t tintBlend[4];
-				tintBlend[0] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorR * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
-				tintBlend[1] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorG * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
-				tintBlend[2] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)((WaterColorB * tintScale + glowTerm) * 255.0f + 0.5f), 0, 255);
-				tintBlend[3] = (std::uint8_t)std::clamp<std::int32_t>((std::int32_t)(a * 255.0f + 0.5f), 1, 254);
-				BlendScanlineConstSrcAlpha(px, vpW, tintBlend);
+			// The water drawn in the middle of the scene leaves only the darkness above it to this pass
+			if (isUnderwaterRow && !light.WaterInScene) {
+				ApplyUnderwaterRow(px, vpW, y, waterRowLimit, invVpH, waveAmplitudePx, wavePhaseBase, wavePhasePerRow);
 			}
 
 			if (hasLighting) {
 				const std::int32_t lmY = std::min(y / scale, lmH - 1);
 				const float* texelBase = light.Lightmap + (std::size_t)lmY * lmW * 2;
-				CombineLightingScanline(px, vpW, texelBase, lmW, scale, ambR, ambG, ambB);
+				// A fully lit texel with no brightness leaves its pixels as they are (see the kernel), in a level at
+				// full ambient light that is most of the view. The kernel is given only the pixels from the first
+				// texel of the row that changes something to the last, the same pixels come out.
+				if (y % scale == 0 || y == 0) {
+					activeFirst = lmW;
+					activeLast = -1;
+					for (std::int32_t x = 0; x < lmW; x++) {
+						if (texelBase[x * 2] < 1.0f || texelBase[x * 2 + 1] > 0.0f) {
+							activeFirst = x;
+							break;
+						}
+					}
+					for (std::int32_t x = lmW - 1; x >= activeFirst; x--) {
+						if (texelBase[x * 2] < 1.0f || texelBase[x * 2 + 1] > 0.0f) {
+							activeLast = x;
+							break;
+						}
+					}
+				}
+				if (activeFirst <= activeLast) {
+					const std::int32_t pxFirst = activeFirst * scale;
+					// The last texel of the map also covers whatever of the row lies past it
+					const std::int32_t pxEnd = (activeLast >= lmW - 1 ? vpW : std::min((activeLast + 1) * scale, vpW));
+					if (pxFirst < pxEnd) {
+						CombineLightingScanline(px + (std::size_t)pxFirst * 4, pxEnd - pxFirst, texelBase + (std::size_t)activeFirst * 2,
+							lmW - activeFirst, scale, ambR, ambG, ambB);
+					}
+				}
 			}
 
 			if (hasWater && !isUnderwaterRow && aboveWaterBlend[3] != 0) {
@@ -634,6 +853,58 @@ namespace nCine::RHI::Software
 
 #if defined(RHI_USE_FB16)
 			SwStoreFbSpan565(fbRow16, g_fb16RowStage, vpW);
+#endif
+		}
+	}
+
+	void SwDevice::ApplyPendingSoftwareWater()
+	{
+		if (_pendingSoftwareWater.empty()) {
+			return;
+		}
+		// The scene being drawn is the one of the viewport it's drawn into
+		std::size_t index = 0;
+		for (std::size_t i = 0; i < _pendingSoftwareWater.size(); i++) {
+			if (_pendingSoftwareWater[i].VpX == _viewport.X && _pendingSoftwareWater[i].VpY == _viewport.Y) {
+				index = i;
+				break;
+			}
+		}
+		const PendingSoftwareLight water = _pendingSoftwareWater[index];
+		_pendingSoftwareWater.erase(_pendingSoftwareWater.begin() + std::ptrdiff_t(index));
+
+		// What is drawn so far has to be in the buffer, and what is drawn next goes over the water
+		FlushSoftwareRenderer();
+		const Framebuffer fb = GetScreenFramebuffer();
+		if (fb.pixels == nullptr) {
+			return;
+		}
+
+		const std::int32_t vpX = std::max<std::int32_t>(0, water.VpX);
+		const std::int32_t vpY = std::max<std::int32_t>(0, water.VpY);
+		const std::int32_t vpW = std::min(water.VpW, fb.width - vpX);
+		const std::int32_t vpH = std::min(water.VpH, fb.height - vpY);
+		if (vpW <= 0 || vpH <= 0) {
+			return;
+		}
+
+		// The same rows as ApplyPendingSoftwareLighting() would tint, only those below the waterline are touched
+		const float invVpH = 1.0f / (float)vpH;
+		const float waterRowLimit = (float)vpH - water.WaterLevelPx;
+		const std::int32_t belowEndExcl = std::min(vpH, (std::int32_t)std::ceil(waterRowLimit));
+		const float waveAmplitudePx = 0.008f * (float)vpW;
+		const float wavePhaseBase = water.WaterTime * 16.0f + (water.WaterCamY + (float)vpH) * invVpH * 20.0f;
+		const float wavePhasePerRow = -20.0f * invVpH;
+		for (std::int32_t y = 0; y < belowEndExcl; y++) {
+			const std::size_t fbRow = (std::size_t)(vpY + vpH - 1 - y);
+#if defined(RHI_USE_FB16)
+			std::uint8_t* fbRow16 = fb.pixels + fbRow * fb.strideBytes + (std::size_t)vpX * 2;
+			SwLoadFbSpan565(g_fb16RowStage, fbRow16, vpW);
+			ApplyUnderwaterRow(g_fb16RowStage, vpW, y, waterRowLimit, invVpH, waveAmplitudePx, wavePhaseBase, wavePhasePerRow);
+			SwStoreFbSpan565(fbRow16, g_fb16RowStage, vpW);
+#else
+			std::uint8_t* px = fb.pixels + fbRow * fb.strideBytes + (std::size_t)vpX * 4;
+			ApplyUnderwaterRow(px, vpW, y, waterRowLimit, invVpH, waveAmplitudePx, wavePhaseBase, wavePhasePerRow);
 #endif
 		}
 	}
@@ -804,6 +1075,7 @@ namespace nCine::RHI::Software
 					generatedShader.computeVaryings(uniformScratch, inst);
 				}
 				ctx.fragmentShader = generatedShader.fragment;
+				ctx.spanShader = FindSpanShader(generatedShader.fragment);
 				ctx.fragmentShaderUserData = uniformScratch;
 				ctx.fragmentShaderUserDataSize = uniformsSize;
 				ctx.blendingEnabled = blendOn;
@@ -835,6 +1107,11 @@ namespace nCine::RHI::Software
 		// screen buffer. Combine is only ever the compositor, so every Combine draw is intercepted here.
 		if (effect == SwEffect::Combine) {
 			ApplyPendingSoftwareLighting();
+			return;
+		}
+		// The water drawn in the middle of the scene, the same per-row water applied to what is drawn so far
+		if (effect == SwEffect::Water) {
+			ApplyPendingSoftwareWater();
 			return;
 		}
 
@@ -954,6 +1231,7 @@ namespace nCine::RHI::Software
 			}
 			ctx.ff = ff;
 			ctx.fragmentShader = fragmentShader;
+			ctx.spanShader = (fragmentShader != nullptr ? FindSpanShader(fragmentShader) : nullptr);
 			ctx.fragmentShaderUserData = userData;
 			ctx.fragmentShaderUserDataSize = userDataSize;
 			// PaletteRemap(+Batched) draws qualify for the tile renderer's palette-LUT fast path (the

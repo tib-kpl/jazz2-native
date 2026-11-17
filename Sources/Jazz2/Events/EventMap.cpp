@@ -230,6 +230,8 @@ namespace Jazz2::Events
 			return;
 		}
 
+		MarkAllActivationChanges();
+
 		// Moved aside for the walk below, which spawns actors and so runs game code that could consume an event
 		// tile and insert into the very list being iterated
 		SmallVector<RollbackTile, 0> saved = Death::move(_eventLayoutForRollback);
@@ -300,6 +302,7 @@ namespace Jazz2::Events
 
 		std::int32_t tileIndex = x + y * _layoutSize.X;
 		EventTile& previousEvent = _eventLayout.Edit(tileIndex);
+		MarkActivationChange(x, y);
 
 		// The checkpoint doesn't hold a copy of the grid, so the value about to be lost is saved to it here
 		if (_hasRollbackCheckpoint) {
@@ -492,12 +495,33 @@ namespace Jazz2::Events
 		}
 	}
 
+	bool EventMap::TakeActivationChanges(AABBi& bounds)
+	{
+		bounds = _activationChanges;
+		_activationChanges = AABBi(INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN);
+		return (bounds.L <= bounds.R);
+	}
+
+	void EventMap::MarkActivationChange(std::int32_t x, std::int32_t y) const
+	{
+		_activationChanges.L = std::min(_activationChanges.L, x);
+		_activationChanges.T = std::min(_activationChanges.T, y);
+		_activationChanges.R = std::max(_activationChanges.R, x);
+		_activationChanges.B = std::max(_activationChanges.B, y);
+	}
+
+	void EventMap::MarkAllActivationChanges() const
+	{
+		_activationChanges = AABBi(INT32_MIN, INT32_MIN, INT32_MAX, INT32_MAX);
+	}
+
 	void EventMap::Deactivate(std::int32_t x, std::int32_t y)
 	{
 		if (IsInLayout(x, y)) {
 			if (EventTile* tile = _eventLayout.Find(x + y * _layoutSize.X)) {
 				if (tile->Event != EventType::Empty) {
 					tile->IsEventActive = false;
+					MarkActivationChange(x, y);
 				}
 			}
 		}
@@ -626,6 +650,9 @@ namespace Jazz2::Events
 
 	void EventMap::ForEachEvent(Function<bool(EventTile&, std::int32_t, std::int32_t)>&& forEachCallback, bool includeOffGrid) const
 	{
+		// The callback is free to change the tiles
+		MarkAllActivationChanges();
+
 		for (std::int32_t y = 0; y < _layoutSize.Y; y++) {
 			for (std::int32_t x = 0; x < _layoutSize.X; x++) {
 				EventTile* event = _eventLayout.Find(x + y * _layoutSize.X);
@@ -780,7 +807,50 @@ namespace Jazz2::Events
 				info.Params[1] = tile.EventParams[1];
 			}
 		}
-		events.append(_skippedDifficultyEvents.begin(), _skippedDifficultyEvents.end());
+		for (const auto& skipped : _skippedDifficultyEvents) {
+			events.push_back(skipped.Info);
+		}
+	}
+
+	void EventMap::ActivateSkippedDifficultyEvents(Tiles::TileMap& tileMap)
+	{
+		for (auto& skipped : _skippedDifficultyEvents) {
+			std::int32_t x = skipped.Info.Tile.X, y = skipped.Info.Tile.Y;
+			EventType eventType = skipped.Info.Event;
+			switch (eventType) {
+				case EventType::Empty:
+				case EventType::LevelStart:
+					break;
+				case EventType::WarpTarget:
+					AddWarpTarget(skipped.EventParams[0], x, y, skipped.EventParams);
+					break;
+				case EventType::ModifierOneWay:
+				case EventType::ModifierVine:
+				case EventType::ModifierHook:
+				case EventType::SceneryDestruct:
+				case EventType::SceneryDestructButtstomp:
+				case EventType::TriggerArea:
+				case EventType::SceneryDestructSpeed:
+				case EventType::SceneryCollapse:
+				case EventType::ModifierHPole:
+				case EventType::ModifierVPole:
+					StoreTileEvent(x, y, eventType, skipped.Flags, skipped.EventParams);
+					tileMap.SetTileEventFlags(x, y, eventType, skipped.EventParams);
+					break;
+				default:
+					StoreTileEvent(x, y, eventType, skipped.Flags, skipped.EventParams);
+					break;
+			}
+
+			auto& entry = _difficultyEvents.emplace_back();
+			entry.Tile = x + y * _layoutSize.X;
+			entry.Difficulty = skipped.Info.Difficulty;
+		}
+		_skippedDifficultyEvents.clear();
+
+		std::sort(_difficultyEvents.begin(), _difficultyEvents.end(), [](const DifficultyEvent& a, const DifficultyEvent& b) {
+			return a.Tile < b.Tile;
+		});
 	}
 
 	void EventMap::LoadEvents(Formats::LevelReader& reader, Tiles::TileMap& tileMap, const LevelLoadOptions& options)
@@ -837,14 +907,16 @@ namespace Jazz2::Events
 			}
 			// As measured in JJ2+, an event left out in this difficulty isn't there for scripts either
 			if (skipped) {
-				// JJ2+ multiplayer modes still take these as control points or capture points
-				if (difficulty == 1 || difficulty == 2) {
-					auto& info = _skippedDifficultyEvents.emplace_back();
-					info.Tile = Vector2i(x, y);
-					info.Difficulty = difficulty;
-					info.Event = (EventType)event.Type;
-					info.Params[0] = event.Params[0];
-					info.Params[1] = event.Params[1];
+				// Multiplayer modes still take these as control points or capture points (a generator is left out for good)
+				if ((difficulty == 1 || difficulty == 2) && (event.Flags & Formats::EventRecord::Generator) == 0) {
+					auto& skippedEvent = _skippedDifficultyEvents.emplace_back();
+					skippedEvent.Info.Tile = Vector2i(x, y);
+					skippedEvent.Info.Difficulty = difficulty;
+					skippedEvent.Info.Event = (EventType)event.Type;
+					skippedEvent.Info.Params[0] = event.Params[0];
+					skippedEvent.Info.Params[1] = event.Params[1];
+					skippedEvent.Flags = (Actors::ActorState)(event.Flags & Formats::EventRecord::Illuminated);
+					std::memcpy(skippedEvent.EventParams, event.Params, sizeof(skippedEvent.EventParams));
 				}
 				return;
 			}
@@ -1089,6 +1161,8 @@ namespace Jazz2::Events
 
 	bool EventMap::InitializeFromStream(Stream& src)
 	{
+		MarkAllActivationChanges();
+
 		// A state saved before off-grid events were spawned has the grid only, their tiles stay as they're loaded then.
 		// The state can come from a save of a level changed since (the user content shadows the shipped levels), so the
 		// size is a real check rather than an assumption.
@@ -1139,6 +1213,8 @@ namespace Jazz2::Events
 
 	bool EventMap::InitializeActiveStateFromStream(Stream& src)
 	{
+		MarkAllActivationChanges();
+
 		std::int32_t layoutSize = src.ReadVariableInt32();
 		if ((layoutSize != GetLayoutCount() && layoutSize != _layoutSize.X * _layoutSize.Y) || layoutSize < 0 ||
 			std::size_t(layoutSize) > _eventLayout.size()) {
@@ -1178,6 +1254,8 @@ namespace Jazz2::Events
 
 	bool EventMap::InitializeSnapshotFromStream(Stream& src)
 	{
+		MarkAllActivationChanges();
+
 		// A snapshot taken before off-grid events were spawned has the grid only, see InitializeFromStream()
 		std::int32_t layoutSize = src.ReadVariableInt32();
 		std::int32_t realLayoutSize = GetLayoutCount();

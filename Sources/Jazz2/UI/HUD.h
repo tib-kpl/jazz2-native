@@ -132,6 +132,13 @@ namespace Jazz2::UI
 			// but the highlight share one size, and powf() is slow on the consoles
 			float SegmentSize[2];
 			float SegmentSizePow[2];
+#	if defined(WITH_RHI_RDP)
+			// The arcs that share a layer and a color, as one list of lines (see DrawWeaponWheelSegment())
+			std::unique_ptr<Vertex[]> MergedVertices;
+			std::int32_t MergedVerticesCount;
+			std::uint16_t MergedLayer;
+			Colorf MergedColor;
+#	endif
 			bool Shown;
 
 			WeaponWheelState();
@@ -230,9 +237,9 @@ namespace Jazz2::UI
 		/** @brief Draws a textured element */
 		void DrawElement(AnimState state, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color,
 			float scaleX = 1.0f, float scaleY = 1.0f, bool additiveBlending = false, float angle = 0.0f);
-		/** @brief Draws an animation of any metadata, nothing for `nullptr` */
+		/** @brief Draws an animation of any metadata, nothing for `nullptr`, with `singleColor` all its pixels in @p color */
 		void DrawGraphics(const GraphicResource* res, std::int32_t frame, float x, float y, std::uint16_t z, Alignment align, const Colorf& color,
-			float scaleX = 1.0f, float scaleY = 1.0f, bool additiveBlending = false, float angle = 0.0f);
+			float scaleX = 1.0f, float scaleY = 1.0f, bool additiveBlending = false, float angle = 0.0f, bool singleColor = false);
 		/** @brief Returns the icon the level gives a weapon, `nullptr` for the icon of the game (see @ref CustomWeaponOptions::HudIcon) */
 		const GraphicResource* FindCustomWeaponIcon(Actors::Player* player, WeaponType weapon);
 		/** @brief Writes the ammo of a weapon as the screen shows it, returns a view of the buffer or of a literal */
@@ -263,6 +270,16 @@ namespace Jazz2::UI
 
 		static constexpr float WeaponWheelAnimDuration = 20.0f;
 		static constexpr std::int32_t WeaponWheelMaxVertices = 768;
+#if defined(WITH_RHI_RDP)
+		static constexpr std::int32_t WeaponWheelMaxMergedVertices = 256;
+#endif
+		// Whether each icon of the weapon wheel gets a dark blot behind it. Nine large blended sprites for a
+		// barely visible shade, left out on the Nintendo 64 and by the software renderer with reduced detail.
+#if defined(DEATH_TARGET_N64) || defined(RHI_SOFTWARE_REDUCED_DETAIL)
+		static constexpr bool WeaponWheelDimsEnabled = false;
+#else
+		static constexpr bool WeaponWheelDimsEnabled = true;
+#endif
 
 #if defined(NCINE_HAS_TOUCH_CONTROLS)
 		static constexpr Alignment Fixed = (Alignment)0x40;

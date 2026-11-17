@@ -79,7 +79,7 @@ endif()
 include(ncine_options)
 include(ncine_get_version)
 
-if(NCINE_PREFERRED_RHI STREQUAL "Metal")
+if(NCINE_PREFERRED_RHI STREQUAL "Metal" OR IOS)	# iOS also for the scene delegate (IosSceneDelegate.mm)
 	# For the Metal backend's one Objective-C++ file (the CAMetalLayer bridge). Enabled before any dependency
 	# subdirectory is added, and together with OBJC: enabling only OBJCXX later would claim SDL2's `.m` files as
 	# Objective-C++ in a directory that never loaded the language ("CMAKE_OBJCXX_COMPILE_OBJECT not set").
@@ -184,7 +184,7 @@ include(ncine_offline_tools)
 # build time instead (see cmake/ncine_ios_bundle.cmake), there is nothing to install or package.
 if(IOS)
 	include(ncine_ios_bundle)
-elseif(NOT WINDOWS_PHONE AND NOT WINDOWS_STORE AND NOT ANDROID AND NOT NCINE_BUILD_ANDROID AND NOT NINTENDO_SWITCH AND NOT NINTENDO_3DS AND NOT VITA AND NOT PLATFORM_PSP AND NOT PLATFORM_PS3 AND NOT NCINE_BUILD_LIBRETRO)
+elseif(NOT WINDOWS_PHONE AND NOT WINDOWS_STORE AND NOT ANDROID AND NOT NCINE_BUILD_ANDROID AND NOT NINTENDO_SWITCH AND NOT NINTENDO_WIIU AND NOT NINTENDO_3DS AND NOT VITA AND NOT PLATFORM_PSP AND NOT PLATFORM_PS3 AND NOT NCINE_BUILD_LIBRETRO)
 	include(ncine_installation)
 endif()
 include(ncine_strip_binaries)

@@ -2,6 +2,11 @@
 
 #include "../EnemyBase.h"
 
+namespace Jazz2::Actors
+{
+	class Player;
+}
+
 namespace Jazz2::Actors::Bosses
 {
 	/**

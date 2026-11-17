@@ -1662,6 +1662,7 @@ namespace nCine
 						SetFocus(focused != nullptr && SdlGfxDevice::IsOwnWindow(SDL_GetWindowID(focused)));
 					}
 					break;
+				case SDL_EVENT_WINDOW_RESTORED:
 				case SDL_EVENT_WINDOW_RESIZED:
 				case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 					if (SdlGfxDevice::IsMainWindow(event.window.windowID)) {
@@ -1740,6 +1741,19 @@ namespace nCine
 				case SDL_APP_LOWMEMORY:
 					LOGW("The system is running low on memory");
 					break;
+#if defined(WITH_RHI_GX2)
+				case SDL_APP_WILLENTERBACKGROUND:
+					// Wii U (HOME menu): wiiu-sdl2 releases the foreground and its scan buffers on the next event
+					// pump, so the GX2 backend has to stop submitting work now
+					RHI::Device::EnterBackground();
+					SetFocus(false);
+					break;
+				case SDL_APP_DIDENTERFOREGROUND:
+					// Also sent once at startup, where it changes nothing
+					RHI::Device::EnterForeground();
+					SetFocus(true);
+					break;
+#endif
 				case SDL_DISPLAYEVENT:
 					_gfxDevice->UpdateMonitors();
 					break;
@@ -1770,10 +1784,22 @@ namespace nCine
 									_shouldQuit = true;
 								}
 								break;
+							case SDL_WINDOWEVENT_RESTORED:
+							case SDL_WINDOWEVENT_EXPOSED:
 							case SDL_WINDOWEVENT_SIZE_CHANGED: {
+								SDL_Window* windowHandle = SDL_GetWindowFromID(event.window.windowID);
+								if (event.window.event != SDL_WINDOWEVENT_SIZE_CHANGED) {
+									// A window started minimized is only exposed, so the size is checked here as well
+									SDL_GetWindowSize(windowHandle, &event.window.data1, &event.window.data2);
+									std::int32_t drawableWidth = 0, drawableHeight = 0;
+									SdlGfxDevice::QueryDrawableSize(windowHandle, event.window.data1, event.window.data2, drawableWidth, drawableHeight);
+									if (drawableWidth <= 0 || drawableHeight <= 0 ||
+										(drawableWidth == _gfxDevice->_drawableWidth && drawableHeight == _gfxDevice->_drawableHeight)) {
+										break;
+									}
+								}
 								_gfxDevice->_width = event.window.data1;
 								_gfxDevice->_height = event.window.data2;
-								SDL_Window* windowHandle = SDL_GetWindowFromID(event.window.windowID);
 								static_cast<SdlGfxDevice*>(_gfxDevice.get())->SyncFullscreenState();
 								// Query the pixel size the way the active backend measures it, then resize the
 								// backend swap chain to match (no-op on OpenGL / software). The explicit resize

@@ -127,6 +127,12 @@ elseif(NCINE_PREFERRED_RHI STREQUAL "RSX")
 	# PSL1GHT's librsx/libgcm_sys come in with the platform packaging further down.
 	message(STATUS "Rendering backend: RSX (PlayStation 3, native libgcm)")
 	target_compile_definitions(${NCINE_APP} PRIVATE "WITH_RHI_RSX")
+elseif(NCINE_PREFERRED_RHI STREQUAL "GX2")
+	# Selects the Wii U's native GX2 backend in RhiFwd.h/Rhi.h. Latte is programmable, so like RSX this is a
+	# full shader backend; its shaders are the OpenGL GLSL compiled offline by CafeGLSL. wut's coreinit and
+	# gx2 come in with the platform packaging (they are part of wut's own libraries).
+	message(STATUS "Rendering backend: GX2 (Nintendo Wii U, native)")
+	target_compile_definitions(${NCINE_APP} PRIVATE "WITH_RHI_GX2")
 elseif(NCINE_PREFERRED_RHI STREQUAL "LegacyGL")
 	# Selects the fixed-function OpenGL 1.x backend in RhiFwd.h/Rhi.h. Its client library is a plain
 	# desktop GL where one exists, MiniGL on AmigaOS 4 and TinyGL on MorphOS - on both of those it has
@@ -214,6 +220,11 @@ endif()
 if(NCINE_RHI_USE_FB16)
 	message(STATUS "Screen framebuffer: RGB565 (16-bit)")
 	target_compile_definitions(${NCINE_APP} PRIVATE "RHI_USE_FB16")
+endif()
+
+if(NCINE_RHI_SOFTWARE_REDUCED_DETAIL)
+	message(STATUS "Software renderer: reduced detail")
+	target_compile_definitions(${NCINE_APP} PRIVATE "RHI_SOFTWARE_REDUCED_DETAIL")
 endif()
 
 if(NOT DEDICATED_SERVER AND NOT NCINE_BUILD_LIBRETRO)
@@ -529,6 +540,10 @@ if(NOT DEDICATED_SERVER AND NOT NCINE_BUILD_LIBRETRO)
 			${NCINE_SOURCE_DIR}/nCine/Backends/SdlAuxiliaryWindow.cpp
 			${NCINE_SOURCE_DIR}/nCine/Backends/AuxiliaryWindowWin32.cpp
 		)
+		if(IOS)
+			list(APPEND HEADERS ${NCINE_SOURCE_DIR}/nCine/Backends/IosSceneDelegate.h)
+			list(APPEND SOURCES ${NCINE_SOURCE_DIR}/nCine/Backends/IosSceneDelegate.mm)
+		endif()
 	elseif(Qt5_FOUND AND NCINE_PREFERRED_BACKEND STREQUAL "QT5")
 		target_compile_definitions(${NCINE_APP} PRIVATE "WITH_QT5")
 		target_link_libraries(${NCINE_APP} PUBLIC Qt5::Widgets)
@@ -1041,6 +1056,20 @@ else()
 			NACP "${NCINE_APP}.nacp"
 			ICON "${NCINE_SOURCE_DIR}/Icons/256px.png"
 			ROMFS "${NCINE_CONTENT_DIR}"
+		)
+	elseif(NINTENDO_WIIU)
+		# Converts the ELF to an .rpx and bundles it with "Content" into a .wuhb (Wii U Homebrew Bundle). The Aroma
+		# environment lists every .wuhb in "sd:/wiiu/apps/" on the Wii U Menu and mounts its content read-only
+		# at "/vol/content" when it is started (see ContentResolver::GetContentPath())
+		wut_create_rpx(${NCINE_APP})
+		wut_create_wuhb(${NCINE_APP}
+			CONTENT "${NCINE_CONTENT_DIR}"
+			NAME "${NCINE_APP_NAME}"
+			SHORTNAME "${NCINE_APP_NAME}"
+			AUTHOR "${NCINE_APP_VENDOR}"
+			ICON "${NCINE_SOURCE_DIR}/Icons/WiiU/Icon.png"
+			TVSPLASH "${NCINE_SOURCE_DIR}/Icons/WiiU/SplashTv.png"
+			DRCSPLASH "${NCINE_SOURCE_DIR}/Icons/WiiU/SplashDrc.png"
 		)
 	elseif(NINTENDO_WII OR NINTENDO_GAMECUBE)
 		# Converts the ELF to the .dol format loadable by Swiss/Homebrew Channel/Dolphin
@@ -2195,10 +2224,12 @@ if(WITH_MULTIPLAYER)
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/Reason.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/ServerDiscovery.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/ServerInitialization.h
+		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/ServerMessage.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/Teams.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/WebhookClient.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/MpPlayerState.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/IGameMode.h
+		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/GameModeBase.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/GameModeFactory.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/CooperationMode.h
 		${NCINE_SOURCE_DIR}/Jazz2/Multiplayer/GameModes/BattleMode.h
