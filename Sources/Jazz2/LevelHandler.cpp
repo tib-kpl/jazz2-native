@@ -3619,6 +3619,23 @@ namespace Jazz2
 				_pressedKeys, ArrayView(joyStates, joyStatesCount), input.PressedActions,
 				_hud == nullptr || !_hud->IsWeaponWheelVisible(i));
 
+			// With a single player, every connected gamepad controls it, otherwise only the first one would (e.g. a handheld's built-in
+			// gamepad takes the first slot and a controller connected later would control nobody, it is bound to the absent 2nd player)
+			if (i == 0 && _players.size() <= 1) {
+				for (std::int32_t j = 1; j < joyStatesCount; j++) {
+					auto extraInput = ControlScheme::FetchProcessedInput(0,
+						_pressedKeys, ArrayView(&joyStates[j], 1), input.PressedActions,
+						_hud == nullptr || !_hud->IsWeaponWheelVisible(0));
+					processedInput.PressedActions |= extraInput.PressedActions;
+					if (std::abs(extraInput.Movement.X) > std::abs(processedInput.Movement.X)) {
+						processedInput.Movement.X = extraInput.Movement.X;
+					}
+					if (std::abs(extraInput.Movement.Y) > std::abs(processedInput.Movement.Y)) {
+						processedInput.Movement.Y = extraInput.Movement.Y;
+					}
+				}
+			}
+
 			input.PressedActionsLast = input.PressedActions;
 			input.PressedActions = processedInput.PressedActions;
 			input.RequiredMovement = processedInput.Movement;
